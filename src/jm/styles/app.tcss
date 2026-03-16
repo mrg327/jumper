@@ -1,0 +1,214 @@
+/* Job Manager — Professional Dashboard Styling */
+
+/* Color Variables */
+$primary: #2563eb;
+$primary-dark: #1e40af;
+$surface: #0f172a;
+$surface-darken-1: #1e293b;
+$surface-darken-2: #334155;
+$text: #e2e8f0;
+$text-muted: #94a3b8;
+$accent: #3b82f6;
+$accent-darken-1: #1e40af;
+$accent-darken-2: #1a2e5a;
+$status-active: #10b981;
+$status-blocked: #ef4444;
+$status-parked: #eab308;
+$status-done: #6b7280;
+
+/* Main app styling */
+Screen {
+    background: $surface;
+}
+
+/* Header */
+Header {
+    background: $accent-darken-2;
+    color: $text;
+    dock: top;
+}
+
+/* Footer */
+Footer {
+    background: $surface-darken-1;
+    color: $text-muted;
+    dock: bottom;
+}
+
+/* Placeholder for empty state */
+#placeholder {
+    text-align: center;
+    color: $text-muted;
+    margin: 4 0;
+}
+
+/* Section titles — consistent styling across all screens */
+.section-title {
+    color: $text-muted;
+    text-style: bold;
+    margin-top: 1;
+    margin-bottom: 0;
+    padding-left: 1;
+}
+
+/* ========== DASHBOARD SCREEN ========== */
+
+/* Project table */
+#project-table {
+    height: auto;
+    max-height: 16;
+    margin: 0 1;
+    background: $surface;
+}
+
+DataTable > .datatable--header {
+    text-style: bold;
+    color: $text;
+    background: $surface-darken-1;
+}
+
+DataTable > .datatable--row {
+    background: $surface;
+    color: $text;
+}
+
+DataTable > .datatable--row:hover {
+    background: $surface-darken-1;
+}
+
+DataTable > .datatable--cursor {
+    background: $accent;
+    color: $surface;
+    text-style: bold;
+}
+
+DataTable > .datatable--cell {
+    color: $text;
+}
+
+/* Info panels */
+#blockers-panel {
+    padding: 0 1 1 1;
+    color: $text;
+    border: none;
+}
+
+#journal-panel {
+    padding: 0 1 1 1;
+    color: $text;
+    border: none;
+}
+
+/* ========== PROJECT VIEW SCREEN ========== */
+
+#project-title {
+    padding: 1 1 0 1;
+    text-style: bold;
+    color: $text;
+    margin-bottom: 1;
+}
+
+#project-meta {
+    color: $text-muted;
+    padding: 0 1;
+    margin-bottom: 1;
+    border-left: solid $surface-darken-2;
+    padding-left: 1;
+}
+
+#focus-panel {
+    padding: 0 1 1 1;
+    color: $text;
+    border: none;
+    margin-top: 1;
+}
+
+#decisions-panel {
+    padding: 0 1 1 1;
+    color: $text;
+    border: none;
+    margin-top: 1;
+}
+
+#log-panel {
+    padding: 0 1 1 1;
+    color: $text;
+    border: none;
+    margin-top: 1;
+}
+
+/* ========== MODAL DIALOGS ========== */
+
+#add-project-dialog {
+    width: 60;
+    height: auto;
+    max-height: 10;
+    border: thick $accent;
+    background: $surface;
+    padding: 1 2;
+    margin: 2 0;
+}
+
+#edit-focus-dialog {
+    width: 60;
+    height: auto;
+    max-height: 10;
+    border: thick $accent;
+    background: $surface;
+    padding: 1 2;
+    margin: 2 0;
+}
+
+#add-project-dialog Label,
+#edit-focus-dialog Label {
+    margin-bottom: 1;
+    color: $text;
+    text-style: bold;
+}
+
+#add-project-dialog Input,
+#edit-focus-dialog Input {
+    width: 100%;
+    border: solid $surface-darken-2;
+    background: $surface-darken-1;
+    color: $text;
+}
+
+#add-project-dialog Input:focus,
+#edit-focus-dialog Input:focus {
+    border: solid $accent;
+}
+
+/* ========== STATUS COLORS ========== */
+
+.status-active {
+    color: $status-active;
+}
+
+.status-blocked {
+    color: $status-blocked;
+}
+
+.status-parked {
+    color: $status-parked;
+}
+
+.status-done {
+    color: $status-done;
+}
+
+/* ========== CONTAINERS & LAYOUT ========== */
+
+VerticalScroll {
+    height: 1fr;
+}
+
+Container {
+    border: none;
+    background: transparent;
+}
+
+/* Center dialog container */
+#dialog-container {
+    align: center middle;
+}

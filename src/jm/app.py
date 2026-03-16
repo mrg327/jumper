@@ -1,5 +1,7 @@
-from textual.app import App, ComposeResult
-from textual.widgets import Header, Footer, Static
+from textual.app import App
+
+from jm.config import ensure_dirs, load_config
+from jm.storage.store import ActiveProjectStore, JournalStore, PeopleStore, ProjectStore
 
 
 class JMApp(App):
@@ -7,9 +9,24 @@ class JMApp(App):
 
     TITLE = "jm — Job Manager"
     CSS_PATH = "styles/app.tcss"
-    BINDINGS = [("q", "quit", "Quit")]
 
-    def compose(self) -> ComposeResult:
-        yield Header()
-        yield Static("Welcome to jm — Job Manager. No projects yet.", id="placeholder")
-        yield Footer()
+    def __init__(self):
+        super().__init__()
+        config = load_config()
+        data_dir = ensure_dirs(config)
+        self.project_store = ProjectStore(data_dir)
+        self.journal_store = JournalStore(data_dir)
+        self.people_store = PeopleStore(data_dir)
+        self.active_store = ActiveProjectStore(data_dir)
+
+    def on_mount(self) -> None:
+        from jm.screens.dashboard import DashboardScreen
+
+        self.push_screen(
+            DashboardScreen(
+                self.project_store,
+                self.journal_store,
+                self.people_store,
+                self.active_store,
+            )
+        )
