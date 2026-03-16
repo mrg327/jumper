@@ -481,13 +481,24 @@ class DashboardScreen(Screen):
         self._refresh_data()
 
     def action_search(self) -> None:
-        self.notify("Search: not yet implemented")
+        """Open search screen."""
+        from jm.screens.search import SearchScreen
+
+        self.app.push_screen(SearchScreen(project_store=self.project_store))
 
     def action_review(self) -> None:
-        self.notify("Review: not yet implemented")
+        """Open morning review screen."""
+        from jm.screens.review import ReviewScreen
+
+        self.app.push_screen(
+            ReviewScreen(self.project_store, self.journal_store, self.active_store)
+        )
 
     def action_people(self) -> None:
-        self.notify("People: not yet implemented")
+        """Open people view."""
+        from jm.screens.people import PeopleScreen
+
+        self.app.push_screen(PeopleScreen(self.people_store, self.project_store))
 
     def action_export(self) -> None:
         self.notify("Export: not yet implemented")

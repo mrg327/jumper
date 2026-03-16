@@ -199,6 +199,24 @@ DataTable > .datatable--cell {
     color: $text;
 }
 
+/* ========== SEARCH SCREEN ========== */
+
+#search-input {
+    margin: 0 1;
+    width: 100%;
+}
+
+#result-count {
+    color: $text-muted;
+    padding: 0 1;
+    height: 1;
+}
+
+#search-results {
+    height: 1fr;
+    margin: 0 1;
+}
+
 /* ========== STATUS COLORS ========== */
 
 .status-active {
