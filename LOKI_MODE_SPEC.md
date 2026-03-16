@@ -620,13 +620,155 @@ No other external dependencies. Keep it minimal.
 
 ---
 
+## Phase 7: UX Polish, Editing & Bug Fixes
+
+**Goal:** Fix all known bugs, add editing capabilities, and polish the UX to match the low-friction design philosophy.
+
+**Context:** After the initial build (Phases 0–6), a review identified 20 issues ranging from data-loss bugs to UX friction. This phase fixes them in priority order.
+
+### Agent 7.1 — Critical Bug Fixes (general-purpose)
+
+Fix these bugs that cause data loss or broken rendering:
+
+1. **Person data wipe on blocker creation** — `_handle_blocker` in `dashboard.py` calls `add_or_update_person(Person(...))` which **replaces** the entire person record, wiping their existing role, projects, and other pending items. Fix `PeopleStore.add_or_update_person()` to **merge** instead of replace: append new pending items, union project lists, preserve existing role unless a new one is provided.
+
+2. **Rich markup injection in blocker panel** — `dashboard.py:132` renders `f"[{count} open]\n..."` but Textual's `Static.update()` interprets `[2 open]` as Rich markup (broken tag). Escape the brackets or use a different format like `(2 open)`.
+
+3. **`action_work` writes journal before resume screen** — The "Started" journal entry is written immediately, but if the user is shown the resume screen and decides to dismiss it, the entry is already committed. The journal append should happen after the resume screen is dismissed, or at minimum the "Started" entry should always be written (it's not cancelable, just informational — this is acceptable if the user presses `w` they intend to work).
+
+4. **`find_last_switch_away` only checks 1 previous day** — Currently calls `get_previous_workday()` once. If the last switch was 3+ days ago, resume context is lost. Should iterate through multiple previous days (up to 14 days back, matching `get_previous_workday`'s own search depth).
+
+### Agent 7.2 — Editing Capabilities (general-purpose)
+
+This is the core new feature: the ability to **edit existing data**, especially moving blockers between projects.
+
+#### Blocker editing (highest priority — user explicitly requested)
+
+**From project view** (`e` on a blocker, or new `m` for move):
+- Show a blocker editor screen that allows:
+  - Edit description text
+  - **Move to different project** — pick from project list
+  - Change the @person
+  - Mark as resolved (alternative to `u` on dashboard)
+  - Delete entirely
+
+**Blocker move flow:**
+```
+╔════════════════════════════════════════════════╗
+║  EDIT BLOCKER                                   ║
+╠════════════════════════════════════════════════╣
+║                                                 ║
+║  Project: HMI Framework                         ║
+║                                                 ║
+║  Description:                                   ║
+║  > waiting on @carol for display spec_           ║
+║                                                 ║
+║  Move to project:                               ║
+║  > (keep current)                               ║
+║    Test Infra                                   ║
+║    OTA Dashboard                                ║
+║                                                 ║
+║  [Enter] Save  [d] Delete  [Esc] Cancel         ║
+╚════════════════════════════════════════════════╝
+```
+
+When moved: remove from source project, add to target project, log the move in both project files and the journal.
+
+#### Project metadata editing
+
+**From project view**, add these keybindings:
+| Key | Action |
+|-----|--------|
+| `e` | Edit current focus (already exists) |
+| `S` | Change status (cycle: active → blocked → parked → done) |
+| `P` | Change priority (cycle: high → medium → low) |
+| `t` | Edit tags |
+| `T` | Edit target date |
+| `x` | Delete project (with confirmation) |
+
+#### Blocker editing from dashboard
+
+**From dashboard blocker panel**, pressing `Enter` or `e` on a blocker should open the edit screen described above. The dashboard doesn't currently have a way to select individual blockers — add a secondary navigation mode or integrate with the unblock flow.
+
+#### Decision editing
+
+**From project view**, pressing `Enter` on a decision should allow editing the text and alternatives.
+
+#### CLI editing commands
+
+```bash
+jm edit <project-slug>           # Open project in $EDITOR (or TUI edit)
+jm move-blocker <project> <idx>  # Move blocker at index to different project (interactive picker)
+jm set-status <project> <status> # Change project status
+jm set-priority <project> <pri>  # Change project priority
+```
+
+### Agent 7.3 — UX Improvements (general-purpose)
+
+Fix UX friction and missing features:
+
+1. **Switch screen: parallel inputs instead of serial** — All three capture fields (left off, blocker, next step) should be visible and navigable simultaneously with Tab/Shift-Tab. Remove the progressive disable/enable pattern. The project selector should also be visible from the start. This reduces the minimum keypresses from 4 Enters to 1.
+
+2. **Use `ModalScreen` for dialogs** — `AddProjectScreen`, `QuickNoteScreen`, `QuickBlockerScreen`, `QuickDecisionScreen`, `UnblockScreen`, and `EditFocusScreen` should extend `ModalScreen` instead of `Screen` so the dashboard remains visible underneath. This provides visual context and feels more polished.
+
+3. **Status colors in DataTable** — The CSS defines `.status-active`, `.status-blocked`, etc. but the dashboard never applies them. Use Rich markup or Textual's `Text` class to colorize the status column: green=active, red=blocked, yellow=parked, dim=done.
+
+4. **Empty-state onboarding** — When launching with no projects, show a centered message: "No projects yet. Press `a` to create your first project, or `?` for help." instead of empty table headers.
+
+5. **Help screen (`?`)** — Implement the keybindings reference screen. Show all bindings in a clean table. Currently stubbed as "not yet implemented".
+
+6. **"Done for day" command** — Add `Ctrl+D` or `f` keybinding to log a "Done for day" journal entry. Add `jm done` CLI command.
+
+7. **`jm add <name>` CLI command** — Create projects from CLI without launching TUI.
+
+8. **`jm list` CLI command** — Show all projects with their slugs and statuses. Essential for scripting (`jm work` needs a slug).
+
+9. **Search debounce** — Add ~200ms debounce on `on_input_changed` using `set_timer` to avoid re-searching on every keystroke.
+
+10. **Journal "Started:" format** — Dashboard journal panel shows `"Started HMI Framework"` but should show `"Started: HMI Framework"` with the colon, matching the spec format.
+
+11. **People screen: resolve pending items** — Pressing Enter on a pending item should resolve it (remove from pending list). Currently read-only.
+
+12. **Dashboard triple data load** — `_refresh_data()` calls `list_projects()` in `_refresh_projects()` and again in `_refresh_blockers()`. Load once, pass the list.
+
+### Agent 7.4 — Tests for Phase 7 (general-purpose, worktree)
+
+Write tests covering:
+- Person merge (not replace) on `add_or_update_person`
+- Blocker move between projects (remove from source, add to target)
+- Project status/priority cycling
+- Blocker editing (description, person, resolution)
+- `jm list`, `jm add`, `jm done` CLI commands
+- Empty-state onboarding message
+- Rich markup escaping in panels
+- `find_last_switch_away` searching multiple previous days
+
+**Gate 7 → Done:** All bugs fixed. Blockers can be moved between projects. Project metadata is editable. Switch screen uses parallel inputs. All new tests pass alongside existing 147 tests.
+
+---
+
+### Updated Agent Parallelization Map
+
+```
+Phase 0–6:  (completed — see above)
+
+Phase 7:  [7.1 Bug Fixes]      → ┐
+          [7.2 Editing]         → ├──→ Gate 7 → DONE
+          [7.3 UX Improvements] → │
+          [7.4 Tests]           → ┘
+```
+
+---
+
 ## Success Criteria
 
 The tool is done when:
-1. `pip install .` works in a clean Python 3.10+ venv
-2. `jm` launches the TUI dashboard
-3. A user can: create a project, start work, capture a note, switch context (with prompted capture), resume (seeing previous notes), run morning review, search across all data, export screen for an agent
+1. `uv sync && uv run jm` launches the TUI dashboard
+2. A user can: create a project, start work, capture a note, switch context (with prompted capture), resume (seeing previous notes), run morning review, search across all data, export screen for an agent
+3. A user can: **edit project metadata** (status, priority, tags, focus, target date), **edit blockers** (description, person, move to different project, delete), **edit decisions**
 4. `jm --dump` produces clean text readable by Claude Code
-5. All tests pass
+5. All tests pass (including Phase 7 tests)
 6. The entire switch cycle (capture → switch → resume) takes <30 seconds of user time
 7. A note can be captured in <5 seconds of user time
+8. **No data loss bugs** — person records merge, blocker moves are atomic, journal entries are consistent
+9. CLI covers full CRUD: `jm add`, `jm list`, `jm note`, `jm block`, `jm status`, `jm done`, `jm work`, `jm switch`, `jm --dump`
