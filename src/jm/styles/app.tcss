@@ -159,15 +159,27 @@ DataTable > .datatable--cell {
     margin: 2 0;
 }
 
+#quick-input-dialog {
+    width: 60;
+    height: auto;
+    max-height: 12;
+    border: thick $accent;
+    background: $surface;
+    padding: 1 2;
+    margin: 2 0;
+}
+
 #add-project-dialog Label,
-#edit-focus-dialog Label {
+#edit-focus-dialog Label,
+#quick-input-dialog Label {
     margin-bottom: 1;
     color: $text;
     text-style: bold;
 }
 
 #add-project-dialog Input,
-#edit-focus-dialog Input {
+#edit-focus-dialog Input,
+#quick-input-dialog Input {
     width: 100%;
     border: solid $surface-darken-2;
     background: $surface-darken-1;
@@ -175,8 +187,16 @@ DataTable > .datatable--cell {
 }
 
 #add-project-dialog Input:focus,
-#edit-focus-dialog Input:focus {
+#edit-focus-dialog Input:focus,
+#quick-input-dialog Input:focus {
     border: solid $accent;
+}
+
+#quick-input-dialog OptionList {
+    height: auto;
+    max-height: 6;
+    background: $surface-darken-1;
+    color: $text;
 }
 
 /* ========== STATUS COLORS ========== */

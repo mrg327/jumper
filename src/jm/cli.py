@@ -12,12 +12,42 @@ def main():
     subparsers.add_parser("block", help="Log a blocker")
     subparsers.add_parser("switch", help="Switch active project")
     subparsers.add_parser("status", help="Show current status")
-    subparsers.add_parser("work", help="Start working on a project")
+    work_parser = subparsers.add_parser("work", help="Start working on a project")
+    work_parser.add_argument("project_name", nargs="?", help="Project slug")
 
     args = parser.parse_args()
 
     if args.dump:
         print("jm — Job Manager\n\nNo projects yet.")
+        return
+
+    if args.command == "work":
+        from datetime import datetime
+
+        from jm.models import JournalEntry
+        from jm.storage.store import create_stores
+
+        project_store, journal_store, _, active_store = create_stores()
+
+        if not getattr(args, "project_name", None):
+            print("Usage: jm work <project-slug>")
+            return
+
+        slug = args.project_name
+        project = project_store.get_project(slug)
+        if not project:
+            print(f"Project '{slug}' not found.")
+            return
+
+        active_store.set_active(slug)
+        time_str = datetime.now().strftime("%H:%M")
+        journal_store.append(JournalEntry(
+            time=time_str,
+            entry_type="Started",
+            project=project.name,
+            details={"focus": project.current_focus} if project.current_focus else {},
+        ))
+        print(f"Now working on: {project.name}")
         return
 
     if args.command:

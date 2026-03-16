@@ -178,14 +178,60 @@ class DashboardScreen(Screen):
     def action_open_project(self) -> None:
         slug = self._get_selected_slug()
         if slug:
-            self.notify(f"Open project: {slug} (not yet implemented)")
+            from jm.screens.project_view import ProjectViewScreen
+
+            self.app.push_screen(ProjectViewScreen(slug, self.project_store))
 
     def action_work(self) -> None:
+        """Start working on the selected project. Shows resume info if available."""
         slug = self._get_selected_slug()
-        if slug:
-            self.active_store.set_active(slug)
-            self.notify(f"Now working on: {slug}")
+        if not slug:
+            return
+
+        project = self.project_store.get_project(slug)
+        if not project:
+            return
+
+        # Set as active and log to journal
+        self.active_store.set_active(slug)
+
+        from datetime import datetime
+        from jm.models import JournalEntry
+
+        time_str = datetime.now().strftime("%H:%M")
+
+        details = {}
+        if project.current_focus:
+            details["focus"] = project.current_focus
+
+        self.journal_store.append(JournalEntry(
+            time=time_str,
+            entry_type="Started",
+            project=project.name,
+            details=details,
+        ))
+
+        # Check if there's resume context to show
+        from jm.screens.work import find_last_switch_away, ResumeScreen
+
+        last_switch = find_last_switch_away(self.journal_store, project.name)
+
+        if last_switch and last_switch.details:
+            # Show resume screen with previous context
+            self.app.push_screen(ResumeScreen(
+                project, last_switch, self.project_store, self._on_work_resumed
+            ))
+        else:
+            self.notify(f"Working on: {project.name}")
             self._refresh_data()
+
+    def _on_work_resumed(self) -> None:
+        self._refresh_data()
+        active = self.active_store.get_active()
+        if active:
+            project = self.project_store.get_project(active)
+            name = project.name if project else active
+            self.notify(f"Working on: {name}")
 
     def action_add_project(self) -> None:
         """Show input for new project name."""
@@ -200,19 +246,239 @@ class DashboardScreen(Screen):
     # -- Stub actions --
 
     def action_note(self) -> None:
-        self.notify("Note: not yet implemented")
+        """Quick note on active project."""
+        slug = self.active_store.get_active() or self._get_selected_slug()
+        if not slug:
+            self.notify("No active project. Press 'w' first.")
+            return
+        project = self.project_store.get_project(slug)
+        if not project:
+            return
+
+        from jm.widgets.quick_input import QuickNoteScreen
+
+        self.app.push_screen(
+            QuickNoteScreen(project.name, lambda text: self._handle_note(slug, text))
+        )
+
+    def _handle_note(self, slug: str, text: str | None) -> None:
+        if not text:
+            return
+        from datetime import date, datetime
+        from jm.models import LogEntry, JournalEntry
+
+        project = self.project_store.get_project(slug)
+        if not project:
+            return
+
+        # Add to project log
+        today = date.today()
+        today_log = None
+        for entry in project.log:
+            if entry.date == today:
+                today_log = entry
+                break
+        if today_log is None:
+            today_log = LogEntry(date=today)
+            project.log.insert(0, today_log)
+        today_log.lines.append(text)
+        self.project_store.save_project(project)
+
+        # Add to journal
+        time_str = datetime.now().strftime("%H:%M")
+        self.journal_store.append(
+            JournalEntry(
+                time=time_str,
+                entry_type="Note",
+                project=project.name,
+                details={"note": text},
+            )
+        )
+        self.notify(f"Note saved to {project.name}")
+        self._refresh_data()
 
     def action_switch(self) -> None:
-        self.notify("Switch: not yet implemented")
+        """Open context-switch capture screen."""
+        active_slug = self.active_store.get_active()
+        if not active_slug:
+            self.notify(
+                "No active project to switch from. Press 'w' to start working first."
+            )
+            return
+
+        from jm.screens.switch import SwitchScreen
+
+        self.app.push_screen(
+            SwitchScreen(
+                self.project_store,
+                self.journal_store,
+                self.active_store,
+                self._on_switch_complete,
+            )
+        )
+
+    def _on_switch_complete(self, result: bool) -> None:
+        if result:
+            self._refresh_data()
+            active = self.active_store.get_active()
+            if active:
+                self.notify(f"Switched to: {active}")
 
     def action_block(self) -> None:
-        self.notify("Block: not yet implemented")
+        """Log a blocker on active project."""
+        slug = self.active_store.get_active() or self._get_selected_slug()
+        if not slug:
+            self.notify("No active project. Press 'w' first.")
+            return
+        project = self.project_store.get_project(slug)
+        if not project:
+            return
+
+        from jm.widgets.quick_input import QuickBlockerScreen
+
+        self.app.push_screen(
+            QuickBlockerScreen(
+                project.name, lambda text: self._handle_blocker(slug, text)
+            )
+        )
+
+    def _handle_blocker(self, slug: str, text: str | None) -> None:
+        if not text:
+            return
+        import re
+        from datetime import date, datetime
+        from jm.models import Blocker, JournalEntry, Person, PendingItem
+
+        project = self.project_store.get_project(slug)
+        if not project:
+            return
+
+        # Extract @mention
+        person = None
+        mention_match = re.search(r"@(\w+)", text)
+        if mention_match:
+            person = f"@{mention_match.group(1)}"
+            # Also update people store
+            self.people_store.add_or_update_person(
+                Person(
+                    handle=person,
+                    projects=[project.name],
+                    pending=[
+                        PendingItem(
+                            description=text,
+                            since=date.today(),
+                            project=project.name,
+                        )
+                    ],
+                )
+            )
+
+        project.blockers.append(
+            Blocker(description=text, person=person, since=date.today())
+        )
+        self.project_store.save_project(project)
+
+        # Journal
+        time_str = datetime.now().strftime("%H:%M")
+        self.journal_store.append(
+            JournalEntry(
+                time=time_str,
+                entry_type="Note",
+                project=project.name,
+                details={"blocker": text},
+            )
+        )
+        self.notify(f"Blocker logged on {project.name}")
+        self._refresh_data()
 
     def action_unblock(self) -> None:
-        self.notify("Unblock: not yet implemented")
+        """Resolve a blocker on active project."""
+        slug = self.active_store.get_active() or self._get_selected_slug()
+        if not slug:
+            self.notify("No active project.")
+            return
+        project = self.project_store.get_project(slug)
+        if not project:
+            return
+
+        open_blockers = [b for b in project.blockers if not b.resolved]
+        if not open_blockers:
+            self.notify("No open blockers")
+            return
+
+        from jm.widgets.quick_input import UnblockScreen
+
+        self.app.push_screen(
+            UnblockScreen(
+                project,
+                self.project_store,
+                lambda desc: self._handle_unblock(slug, desc),
+            )
+        )
+
+    def _handle_unblock(self, slug: str, description: str | None) -> None:
+        if not description:
+            return
+        from datetime import datetime
+        from jm.models import JournalEntry
+
+        project = self.project_store.get_project(slug)
+        name = project.name if project else slug
+
+        time_str = datetime.now().strftime("%H:%M")
+        self.journal_store.append(
+            JournalEntry(
+                time=time_str,
+                entry_type="Note",
+                project=name,
+                details={"resolved": description},
+            )
+        )
+        self.notify(f"Blocker resolved on {name}")
+        self._refresh_data()
 
     def action_decide(self) -> None:
-        self.notify("Decide: not yet implemented")
+        """Log a decision on active project."""
+        slug = self.active_store.get_active() or self._get_selected_slug()
+        if not slug:
+            self.notify("No active project. Press 'w' first.")
+            return
+        project = self.project_store.get_project(slug)
+        if not project:
+            return
+
+        from jm.widgets.quick_input import QuickDecisionScreen
+
+        self.app.push_screen(
+            QuickDecisionScreen(
+                project.name, lambda text: self._handle_decision(slug, text)
+            )
+        )
+
+    def _handle_decision(self, slug: str, text: str | None) -> None:
+        if not text:
+            return
+        from datetime import date, datetime
+        from jm.models import Decision, JournalEntry
+
+        project = self.project_store.get_project(slug)
+        if not project:
+            return
+
+        project.decisions.append(Decision(date=date.today(), choice=text))
+        self.project_store.save_project(project)
+
+        time_str = datetime.now().strftime("%H:%M")
+        self.journal_store.append(
+            JournalEntry(
+                time=time_str,
+                entry_type="Note",
+                project=project.name,
+                details={"decision": text},
+            )
+        )
+        self.notify(f"Decision logged on {project.name}")
+        self._refresh_data()
 
     def action_search(self) -> None:
         self.notify("Search: not yet implemented")
