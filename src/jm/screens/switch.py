@@ -125,47 +125,33 @@ class SwitchScreen(Screen):
             if project.slug != self.current_slug:
                 option_list.add_option(Option(project.name, id=project.slug))
 
-        # Focus the first input
+        # Focus the first input; all fields are enabled from the start
         self.query_one("#left-off-input", Input).focus()
 
-        # Disable inputs that aren't active yet
-        self.query_one("#blocker-input", Input).disabled = True
-        self.query_one("#next-step-input", Input).disabled = True
-        self.query_one("#project-selector", OptionList).disabled = True
-
     # ------------------------------------------------------------------
-    # Input flow  (left_off -> blocker -> next_step -> target selector)
+    # Input flow  (Enter in each field advances focus to the next)
     # ------------------------------------------------------------------
 
     def on_input_submitted(self, event) -> None:  # noqa: ANN001
         input_id = event.input.id
-        value = event.value.strip()
 
         if input_id == "left-off-input":
-            self.left_off = value
-            blocker_input = self.query_one("#blocker-input", Input)
-            blocker_input.disabled = False
-            blocker_input.focus()
-
+            self.query_one("#blocker-input", Input).focus()
         elif input_id == "blocker-input":
-            self.blocker = value
-            next_input = self.query_one("#next-step-input", Input)
-            next_input.disabled = False
-            next_input.focus()
-
+            self.query_one("#next-step-input", Input).focus()
         elif input_id == "next-step-input":
-            self.next_step = value
-            selector = self.query_one("#project-selector", OptionList)
-            selector.disabled = False
-            selector.focus()
+            self.query_one("#project-selector", OptionList).focus()
 
     # ------------------------------------------------------------------
     # Target selection
     # ------------------------------------------------------------------
 
     def on_option_list_option_selected(self, event) -> None:  # noqa: ANN001
-        """User selected a target project — execute the switch."""
+        """User selected a target project — collect all inputs and execute the switch."""
         self.target_slug = str(event.option.id)
+        self.left_off = self.query_one("#left-off-input", Input).value.strip()
+        self.blocker = self.query_one("#blocker-input", Input).value.strip()
+        self.next_step = self.query_one("#next-step-input", Input).value.strip()
         self._execute_switch()
 
     # ------------------------------------------------------------------
@@ -201,7 +187,7 @@ class SwitchScreen(Screen):
             # Add blocker if specified
             if self.blocker:
                 person: Optional[str] = None
-                mention_match = re.search(r"@(\w+)", self.blocker)
+                mention_match = re.search(r"@([\w-]+)", self.blocker)
                 if mention_match:
                     person = f"@{mention_match.group(1)}"
 

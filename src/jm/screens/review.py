@@ -115,7 +115,7 @@ class ReviewScreen(Screen):
 
         if blocker_lines:
             panel.update(
-                f"  [{len(blocker_lines)} open]\n" + "\n".join(blocker_lines)
+                f"  ({len(blocker_lines)} open)\n" + "\n".join(blocker_lines)
             )
         else:
             panel.update("  No open blockers!")

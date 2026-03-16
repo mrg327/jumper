@@ -31,6 +31,43 @@ def main():
     work_parser = subparsers.add_parser("work", help="Start working on a project")
     work_parser.add_argument("project_name", nargs="?", help="Project slug")
 
+    # break command
+    break_parser = subparsers.add_parser("break", help="Take a break (15min, lunch, or end of day)")
+    break_parser.add_argument("type", nargs="?", default="eod",
+                              choices=["15min", "lunch", "eod"],
+                              help="Break type (default: eod)")
+
+    # done command (alias for break eod)
+    subparsers.add_parser("done", help="End of day — alias for 'break eod'")
+
+    # add command
+    add_parser = subparsers.add_parser("add", help="Create a new project")
+    add_parser.add_argument("name", help="Project name")
+    add_parser.add_argument("--status", default="active",
+                            choices=["active", "blocked", "parked", "done"],
+                            help="Initial status (default: active)")
+    add_parser.add_argument("--priority", default="medium",
+                            choices=["high", "medium", "low"],
+                            help="Initial priority (default: medium)")
+    add_parser.add_argument("--tags", default="", help="Comma-separated tags")
+
+    # list command
+    list_parser = subparsers.add_parser("list", help="List all projects")
+    list_parser.add_argument("--status", choices=["active", "blocked", "parked", "done"],
+                             help="Filter by status")
+
+    # set-status command
+    set_status_parser = subparsers.add_parser("set-status", help="Change a project's status")
+    set_status_parser.add_argument("project_slug", help="Project slug")
+    set_status_parser.add_argument("status", choices=["active", "blocked", "parked", "done"],
+                                   help="New status")
+
+    # set-priority command
+    set_priority_parser = subparsers.add_parser("set-priority", help="Change a project's priority")
+    set_priority_parser.add_argument("project_slug", help="Project slug")
+    set_priority_parser.add_argument("priority", choices=["high", "medium", "low"],
+                                     help="New priority")
+
     args = parser.parse_args()
 
     # Handle --dump
@@ -65,6 +102,31 @@ def main():
 
     if args.command == "work":
         _cmd_work(args.project_name)
+        return
+
+    if args.command == "break":
+        _cmd_break(args.type)
+        return
+
+    if args.command == "done":
+        _cmd_break("eod")
+        return
+
+    if args.command == "add":
+        tags = [t.strip() for t in args.tags.split(",") if t.strip()] if args.tags else []
+        _cmd_add(args.name, status=args.status, priority=args.priority, tags=tags)
+        return
+
+    if args.command == "list":
+        _cmd_list(status=args.status)
+        return
+
+    if args.command == "set-status":
+        _cmd_set_status(args.project_slug, args.status)
+        return
+
+    if args.command == "set-priority":
+        _cmd_set_priority(args.project_slug, args.priority)
         return
 
     # Default: launch TUI
@@ -135,7 +197,7 @@ def _cmd_block(text: str) -> None:
 
     # Extract @mention
     person = None
-    mention_match = re.search(r"@(\w+)", text)
+    mention_match = re.search(r"@([\w-]+)", text)
     if mention_match:
         person = f"@{mention_match.group(1)}"
 
@@ -245,6 +307,102 @@ def _cmd_work(slug: str | None) -> None:
         details={"focus": project.current_focus} if project.current_focus else {},
     ))
     print(f"Now working on: {project.name}")
+
+
+def _cmd_break(break_type: str = "eod") -> None:
+    """Log a break — 15min, lunch, or end of day."""
+    from jm.models import JournalEntry
+    from jm.storage.store import create_stores
+
+    project_store, journal_store, _, active_store = create_stores()
+
+    time_str = datetime.now().strftime("%H:%M")
+
+    entry_type_map = {"15min": "Break", "lunch": "Lunch", "eod": "Done"}
+    label_map = {"15min": "15 min break", "lunch": "Out to lunch", "eod": "Done for day"}
+
+    active_slug = active_store.get_active()
+    project_name = ""
+    if active_slug:
+        project = project_store.get_project(active_slug)
+        project_name = project.name if project else active_slug
+
+    journal_store.append(JournalEntry(
+        time=time_str,
+        entry_type=entry_type_map[break_type],
+        project=project_name,
+        details={"break": label_map[break_type]},
+    ))
+
+    # Only clear active project on end of day
+    if break_type == "eod":
+        active_store.clear_active()
+
+    print(label_map[break_type])
+
+
+def _cmd_add(name: str, status: str = "active", priority: str = "medium",
+             tags: list[str] | None = None) -> None:
+    """Create a new project from the CLI."""
+    from jm.storage.store import create_stores
+
+    project_store, _, _, _ = create_stores()
+
+    kwargs: dict = {"status": status, "priority": priority}
+    if tags:
+        kwargs["tags"] = tags
+
+    project = project_store.create_project(name, **kwargs)
+    print(f"Created project '{project.name}' (slug: {project.slug})")
+
+
+def _cmd_list(status: str | None = None) -> None:
+    """List all projects, optionally filtered by status."""
+    from jm.storage.store import create_stores
+
+    project_store, _, _, _ = create_stores()
+
+    projects = project_store.list_projects(status=status)
+    if not projects:
+        print("No projects found.")
+        return
+
+    for p in projects:
+        print(f"{p.slug}\t{p.status}\t{p.priority}\t{p.name}")
+
+
+def _cmd_set_status(slug: str, new_status: str) -> None:
+    """Change a project's status."""
+    from jm.storage.store import create_stores
+
+    project_store, _, _, _ = create_stores()
+
+    project = project_store.get_project(slug)
+    if not project:
+        print(f"Project '{slug}' not found.")
+        sys.exit(1)
+
+    old_status = project.status
+    project.status = new_status
+    project_store.save_project(project)
+    print(f"{project.name}: status {old_status} → {new_status}")
+
+
+def _cmd_set_priority(slug: str, new_priority: str) -> None:
+    """Change a project's priority."""
+    from jm.storage.store import create_stores
+
+    project_store, _, _, _ = create_stores()
+
+    project = project_store.get_project(slug)
+    if not project:
+        print(f"Project '{slug}' not found.")
+        sys.exit(1)
+
+    old_priority = project.priority
+    project.priority = new_priority
+    project_store.save_project(project)
+    print(f"{project.name}: priority {old_priority} → {new_priority}")
 
 
 if __name__ == "__main__":

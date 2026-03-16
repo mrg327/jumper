@@ -52,7 +52,7 @@ class PeopleFile:
 
         for line in text.split("\n"):
             # Check for person header: ## @handle
-            header_match = re.match(r"^##\s+(@\w+)", line)
+            header_match = re.match(r"^##\s+(@[\w-]+)", line)
             if header_match:
                 if current_person is not None:
                     people.append(current_person)

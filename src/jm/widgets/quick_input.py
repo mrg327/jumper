@@ -13,14 +13,14 @@ from typing import Optional
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Center, Vertical
-from textual.screen import Screen
+from textual.screen import ModalScreen
 from textual.widgets import Input, Label, Static
 
 from jm.models import Blocker, Decision, LogEntry, JournalEntry, Person, PendingItem
 from jm.storage.store import ProjectStore, JournalStore, PeopleStore, ActiveProjectStore
 
 
-class QuickNoteScreen(Screen):
+class QuickNoteScreen(ModalScreen):
     """Quick note on active project — single input, Enter to submit."""
 
     BINDINGS = [Binding("escape", "cancel", "Cancel")]
@@ -46,7 +46,7 @@ class QuickNoteScreen(Screen):
         self.callback(None)
 
 
-class QuickBlockerScreen(Screen):
+class QuickBlockerScreen(ModalScreen):
     """Log a blocker — single input with @mention detection."""
 
     BINDINGS = [Binding("escape", "cancel", "Cancel")]
@@ -75,7 +75,7 @@ class QuickBlockerScreen(Screen):
         self.callback(None)
 
 
-class QuickDecisionScreen(Screen):
+class QuickDecisionScreen(ModalScreen):
     """Log a decision — single input."""
 
     BINDINGS = [Binding("escape", "cancel", "Cancel")]
@@ -104,7 +104,7 @@ class QuickDecisionScreen(Screen):
         self.callback(None)
 
 
-class UnblockScreen(Screen):
+class UnblockScreen(ModalScreen):
     """Show open blockers for active project, select one to resolve."""
 
     BINDINGS = [

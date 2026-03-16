@@ -235,6 +235,46 @@ DataTable > .datatable--cell {
     color: $status-done;
 }
 
+/* ========== DASHBOARD LAYOUT ========== */
+
+#dashboard-layout {
+    height: 1fr;
+}
+
+#main-content {
+    width: 1fr;
+    height: 100%;
+}
+
+/* ========== PLUGIN SIDEBAR ========== */
+
+PluginSidebar {
+    width: 28;
+    min-width: 20;
+    max-width: 40;
+    height: 100%;
+    border-left: solid $surface-darken-2;
+    background: $surface;
+    padding: 0;
+}
+
+PluginSidebar:focus-within {
+    border-left: solid $accent;
+}
+
+PluginSidebar #sidebar-title {
+    text-style: bold;
+    color: $text-muted;
+    text-align: center;
+    padding: 0 1;
+    margin-bottom: 1;
+}
+
+PluginSidebar #no-plugins {
+    color: $text-muted;
+    padding: 0 1;
+}
+
 /* ========== CONTAINERS & LAYOUT ========== */
 
 VerticalScroll {

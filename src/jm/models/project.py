@@ -227,7 +227,7 @@ def _process_section(
                     text = text[: since_match.start()].strip()
 
             # Extract @mention from text
-            mention_match = re.search(r"@(\w+)", text)
+            mention_match = re.search(r"@([\w-]+)", text)
             if mention_match:
                 person = f"@{mention_match.group(1)}"
                 # Remove the @mention from description

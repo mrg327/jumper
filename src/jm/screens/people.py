@@ -8,7 +8,8 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import VerticalScroll
 from textual.screen import Screen
-from textual.widgets import Footer, Header, Label, Static
+from textual.widgets import Footer, Header, Label, OptionList, Static
+from textual.widgets.option_list import Option
 
 from jm.storage.store import PeopleStore, ProjectStore
 
@@ -26,6 +27,8 @@ class PeopleScreen(Screen):
         super().__init__()
         self.people_store = people_store
         self.project_store = project_store
+        # Parallel list to OptionList items: (project_slug, blocker_index)
+        self._waiting_refs: list[tuple[str, int]] = []
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -34,7 +37,8 @@ class PeopleScreen(Screen):
             yield Static(id="people-panel")
 
             yield Label("WAITING ON (open blockers by person)", classes="section-title")
-            yield Static(id="waiting-panel")
+            yield Label("  Press Enter on an item to mark it resolved", id="waiting-hint")
+            yield OptionList(id="waiting-panel")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -68,29 +72,48 @@ class PeopleScreen(Screen):
 
         # Build waiting-on view from project blockers
         projects = self.project_store.list_projects()
-        waiting: dict[str, list[str]] = {}  # person -> list of blocker descriptions
+        waiting_option_list = self.query_one("#waiting-panel", OptionList)
+        waiting_option_list.clear_options()
+        self._waiting_refs = []
 
         for project in projects:
-            for blocker in project.blockers:
+            for idx, blocker in enumerate(project.blockers):
                 if not blocker.resolved and blocker.person:
-                    person = blocker.person
-                    if person not in waiting:
-                        waiting[person] = []
                     days = ""
                     if blocker.since:
                         delta = (date.today() - blocker.since).days
                         days = f" ({delta} days)"
-                    waiting[person].append(f"{project.name}: {blocker.description}{days}")
+                    label = f"{blocker.person}  \u2298  {project.name}: {blocker.description}{days}"
+                    opt_id = str(len(self._waiting_refs))
+                    waiting_option_list.add_option(Option(label, id=opt_id))
+                    self._waiting_refs.append((project.slug, idx))
 
-        if waiting:
-            lines = []
-            for person, items in sorted(waiting.items()):
-                lines.append(f"  {person}:")
-                for item in items:
-                    lines.append(f"    \u2298 {item}")
-            self.query_one("#waiting-panel", Static).update("\n".join(lines))
-        else:
-            self.query_one("#waiting-panel", Static).update("  No outstanding items")
+        if not self._waiting_refs:
+            waiting_option_list.add_option(Option("  No outstanding items", id="empty"))
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        """Resolve the selected blocker."""
+        opt_id = str(event.option.id)
+        if opt_id == "empty":
+            return
+        ref_idx = int(opt_id)
+        if ref_idx >= len(self._waiting_refs):
+            return
+
+        project_slug, blocker_idx = self._waiting_refs[ref_idx]
+        project = self.project_store.get_project(project_slug)
+        if not project:
+            return
+        if blocker_idx >= len(project.blockers):
+            return
+
+        blocker = project.blockers[blocker_idx]
+        blocker.resolved = True
+        blocker.resolved_date = date.today()
+        self.project_store.save_project(project)
+
+        self.notify(f"Resolved: {blocker.description}")
+        self._refresh()
 
     def action_go_back(self) -> None:
         self.app.pop_screen()

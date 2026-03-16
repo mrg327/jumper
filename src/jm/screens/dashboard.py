@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Center, Vertical, VerticalScroll
-from textual.screen import Screen
+from textual.containers import Center, Horizontal, Vertical, VerticalScroll
+from textual.screen import ModalScreen, Screen
 from textual.widgets import DataTable, Footer, Header, Input, Label, Static
 
 from jm.storage.store import ActiveProjectStore, JournalStore, PeopleStore, ProjectStore
@@ -30,6 +31,8 @@ class DashboardScreen(Screen):
         Binding("p", "people", "People"),
         Binding("a", "add_project", "Add"),
         Binding("ctrl+e", "export", "Export"),
+        Binding("f", "take_break", "Break"),
+        Binding("tab", "focus_sidebar", "Sidebar", show=False),
         Binding("question_mark", "help", "Help"),
     ]
 
@@ -48,24 +51,90 @@ class DashboardScreen(Screen):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        with VerticalScroll():
-            # Active projects section
-            yield Label("ACTIVE PROJECTS", classes="section-title")
-            yield DataTable(id="project-table")
+        with Horizontal(id="dashboard-layout"):
+            with VerticalScroll(id="main-content"):
+                # Active projects section
+                yield Label("ACTIVE PROJECTS", classes="section-title")
+                yield DataTable(id="project-table")
 
-            # Blockers section
-            yield Label("BLOCKERS", classes="section-title")
-            yield Static(id="blockers-panel")
+                # Blockers section
+                yield Label("BLOCKERS", classes="section-title")
+                yield Static(id="blockers-panel")
 
-            # Today's log section
-            yield Label("TODAY'S LOG", classes="section-title")
-            yield Static(id="journal-panel")
+                # Today's log section
+                yield Label("TODAY'S LOG", classes="section-title")
+                yield Static(id="journal-panel")
+            yield self._create_sidebar()
         yield Footer()
+
+    def _create_sidebar(self):
+        """Create the plugin sidebar with config-based plugin ordering."""
+        from jm.config import load_config
+        from jm.widgets.plugin_sidebar import PluginSidebar
+
+        config = load_config()
+        plugins_config = config.get("plugins", {})
+        enabled = plugins_config.get("enabled")  # None means show all
+        return PluginSidebar(enabled_plugins=enabled)
 
     def on_mount(self) -> None:
         """Load data and populate the dashboard."""
         self._setup_project_table()
         self._refresh_data()
+        self._configure_plugins()
+
+    def on_screen_resume(self) -> None:
+        """Refresh data whenever this screen regains focus (e.g., returning from project view)."""
+        self._refresh_data()
+
+    def _configure_plugins(self) -> None:
+        """Configure plugins with settings from config after mount."""
+        from jm.config import load_config
+
+        config = load_config()
+        plugins_config = config.get("plugins", {})
+        notif_config = plugins_config.get("notifications", {})
+        reminders = notif_config.get("reminders", [])
+
+        # Configure notification reminders if any
+        from jm.plugins.notifications import NotificationsPlugin
+
+        for plugin in self.query(NotificationsPlugin):
+            plugin.configure_reminders(reminders)
+
+        # Configure pomodoro settings if any
+        pomo_config = plugins_config.get("pomodoro", {})
+        if pomo_config:
+            from jm.plugins.pomodoro import PomodoroPlugin
+
+            for plugin in self.query(PomodoroPlugin):
+                if "work_minutes" in pomo_config:
+                    plugin.work_seconds = pomo_config["work_minutes"] * 60
+                    plugin.remaining = plugin.work_seconds
+                if "short_break_minutes" in pomo_config:
+                    plugin.short_break_seconds = pomo_config["short_break_minutes"] * 60
+                if "long_break_minutes" in pomo_config:
+                    plugin.long_break_seconds = pomo_config["long_break_minutes"] * 60
+                if "sessions_before_long" in pomo_config:
+                    plugin.sessions_before_long = pomo_config["sessions_before_long"]
+
+    def on_plugin_notification(self, event) -> None:
+        """Route PluginNotification to the NotificationsPlugin."""
+        from jm.plugins.notifications import NotificationsPlugin
+
+        for plugin in self.query(NotificationsPlugin):
+            plugin.add_notification(event.source_name, event.notification_message)
+            break
+
+    def action_focus_sidebar(self) -> None:
+        """Move focus to the plugin sidebar."""
+        from jm.widgets.plugin_sidebar import PluginSidebar
+
+        sidebar = self.query_one(PluginSidebar)
+        # Focus the first focusable plugin in the sidebar
+        focusable = [w for w in sidebar.query("*") if w.can_focus]
+        if focusable:
+            focusable[0].focus()
 
     def _setup_project_table(self) -> None:
         table = self.query_one("#project-table", DataTable)
@@ -74,20 +143,40 @@ class DashboardScreen(Screen):
 
     def _refresh_data(self) -> None:
         """Reload all data from storage."""
-        self._refresh_projects()
-        self._refresh_blockers()
+        projects = self.project_store.list_projects()
+        self._refresh_projects(projects)
+        self._refresh_blockers(projects)
         self._refresh_journal()
 
-    def _refresh_projects(self) -> None:
+    def _refresh_projects(self, projects: list | None = None) -> None:
         table = self.query_one("#project-table", DataTable)
         table.clear()
 
         active_slug = self.active_store.get_active()
-        projects = self.project_store.list_projects()
+        if projects is None:
+            projects = self.project_store.list_projects()
 
         # Sort: active first, then blocked, then parked, then done
         status_order = {"active": 0, "blocked": 1, "parked": 2, "done": 3}
         projects.sort(key=lambda p: (status_order.get(p.status, 99), p.name))
+
+        if not projects:
+            table.add_row(
+                "",
+                "No projects yet. Press 'a' to create your first project, or '?' for help.",
+                "",
+                "",
+                "",
+            )
+            return
+
+        status_colors = {
+            "active": "green",
+            "blocked": "red",
+            "parked": "yellow",
+            "done": "dim",
+        }
+        pri_colors = {"high": "bold", "medium": "", "low": "dim"}
 
         for project in projects:
             indicator = "\u25cf" if project.status in ("active", "blocked") else "\u25cb"
@@ -99,18 +188,22 @@ class DashboardScreen(Screen):
             )
             focus = project.current_focus[:40] if project.current_focus else ""
 
+            status_text = Text(project.status, style=status_colors.get(project.status, ""))
+            pri_text = Text(pri_display, style=pri_colors.get(project.priority, ""))
+
             table.add_row(
                 indicator,
                 project.name,
-                project.status,
-                pri_display,
+                status_text,
+                pri_text,
                 focus,
                 key=project.slug,
             )
 
-    def _refresh_blockers(self) -> None:
+    def _refresh_blockers(self, projects: list | None = None) -> None:
         panel = self.query_one("#blockers-panel", Static)
-        projects = self.project_store.list_projects()
+        if projects is None:
+            projects = self.project_store.list_projects()
 
         blocker_lines: list[str] = []
         for project in projects:
@@ -129,7 +222,7 @@ class DashboardScreen(Screen):
 
         if blocker_lines:
             count = len(blocker_lines)
-            panel.update(f"[{count} open]\n" + "\n".join(blocker_lines))
+            panel.update(f"({count} open)\n" + "\n".join(blocker_lines))
         else:
             panel.update("  No open blockers")
 
@@ -147,8 +240,11 @@ class DashboardScreen(Screen):
                 lines.append(f"  {entry.time}  Switched \u2192 {entry.project}")
             elif entry.entry_type == "Done":
                 lines.append(f"  {entry.time}  Done for day")
+            elif entry.entry_type in ("Break", "Lunch"):
+                label = entry.details.get("break", entry.entry_type)
+                lines.append(f"  {entry.time}  {label}")
             else:
-                lines.append(f"  {entry.time}  {entry.entry_type} {entry.project}")
+                lines.append(f"  {entry.time}  {entry.entry_type}: {entry.project}")
 
         panel.update("\n".join(lines))
 
@@ -175,12 +271,21 @@ class DashboardScreen(Screen):
 
     # -- Implemented actions --
 
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
+        """Handle Enter when DataTable has focus (Textual emits RowSelected)."""
+        slug = str(event.row_key.value) if event.row_key.value else None
+        if slug:
+            from jm.screens.project_view import ProjectViewScreen
+
+            self.app.push_screen(ProjectViewScreen(slug, self.project_store, self.journal_store))
+
     def action_open_project(self) -> None:
+        """Fallback for Enter when DataTable does not have focus."""
         slug = self._get_selected_slug()
         if slug:
             from jm.screens.project_view import ProjectViewScreen
 
-            self.app.push_screen(ProjectViewScreen(slug, self.project_store))
+            self.app.push_screen(ProjectViewScreen(slug, self.project_store, self.journal_store))
 
     def action_work(self) -> None:
         """Start working on the selected project. Shows resume info if available."""
@@ -355,7 +460,7 @@ class DashboardScreen(Screen):
 
         # Extract @mention
         person = None
-        mention_match = re.search(r"@(\w+)", text)
+        mention_match = re.search(r"@([\w-]+)", text)
         if mention_match:
             person = f"@{mention_match.group(1)}"
             # Also update people store
@@ -513,13 +618,144 @@ class DashboardScreen(Screen):
         self.notify(f"Exported to {path}")
 
     def action_help(self) -> None:
-        self.notify("Help: not yet implemented")
+        """Show help screen with keybindings."""
+        self.app.push_screen(HelpScreen())
+
+    def action_take_break(self) -> None:
+        """Show break options: 15 min, lunch, end of day."""
+        self.app.push_screen(
+            BreakScreen(
+                self.journal_store,
+                self.active_store,
+                self.project_store,
+                self._on_break_taken,
+            )
+        )
+
+    def _on_break_taken(self, taken: bool) -> None:
+        if taken:
+            self._refresh_data()
 
     def action_quit(self) -> None:
         self.app.exit()
 
 
-class AddProjectScreen(Screen):
+class BreakScreen(ModalScreen):
+    """Break options: 15 min, lunch, or end of day."""
+
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+
+    BREAK_OPTIONS = [
+        ("15min", "15 min break"),
+        ("lunch", "Out to lunch"),
+        ("eod", "End of day"),
+    ]
+
+    def __init__(self, journal_store, active_store, project_store, callback):
+        super().__init__()
+        self.journal_store = journal_store
+        self.active_store = active_store
+        self.project_store = project_store
+        self.callback = callback
+
+    def compose(self) -> ComposeResult:
+        from textual.widgets import OptionList
+        from textual.widgets.option_list import Option
+
+        with Center():
+            with Vertical(id="quick-input-dialog"):
+                yield Label("Take a break:")
+                yield OptionList(
+                    *[Option(label, id=key) for key, label in self.BREAK_OPTIONS],
+                    id="break-options",
+                )
+
+    def on_option_list_option_selected(self, event) -> None:
+        from datetime import datetime
+        from jm.models import JournalEntry
+
+        choice = str(event.option.id)
+        time_str = datetime.now().strftime("%H:%M")
+
+        active_slug = self.active_store.get_active()
+        project_name = ""
+        if active_slug:
+            project = self.project_store.get_project(active_slug)
+            project_name = project.name if project else active_slug
+
+        entry_type_map = {
+            "15min": "Break",
+            "lunch": "Lunch",
+            "eod": "Done",
+        }
+        label_map = {
+            "15min": "15 min break",
+            "lunch": "Out to lunch",
+            "eod": "Done for day",
+        }
+
+        self.journal_store.append(
+            JournalEntry(
+                time=time_str,
+                entry_type=entry_type_map[choice],
+                project=project_name,
+                details={"break": label_map[choice]},
+            )
+        )
+
+        # Only clear active project on end of day
+        if choice == "eod":
+            self.active_store.clear_active()
+
+        self.app.pop_screen()
+        self.notify(label_map[choice])
+        self.callback(True)
+
+    def action_cancel(self) -> None:
+        self.app.pop_screen()
+        self.callback(False)
+
+
+class HelpScreen(ModalScreen):
+    """Help screen showing all keybindings."""
+
+    BINDINGS = [
+        Binding("escape", "dismiss", "Close"),
+        Binding("question_mark", "dismiss", "Close"),
+    ]
+
+    KEYBINDINGS = [
+        ("j / k", "Navigate up/down"),
+        ("Enter", "Open project"),
+        ("w", "Start working on project"),
+        ("s", "Switch context (capture prompt)"),
+        ("n", "Quick note"),
+        ("b", "Log blocker"),
+        ("u", "Resolve blocker"),
+        ("d", "Log decision"),
+        ("/", "Search"),
+        ("r", "Morning review"),
+        ("p", "People view"),
+        ("a", "Add project"),
+        ("Ctrl+E", "Export screen dump"),
+        ("f", "Break (15 min / lunch / end of day)"),
+        ("q", "Quit"),
+        ("?", "This help screen"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        with Center():
+            with Vertical(id="help-dialog"):
+                yield Label("KEYBINDINGS", classes="section-title")
+                rows = "\n".join(
+                    f"  {key:<12}  {description}"
+                    for key, description in self.KEYBINDINGS
+                )
+                yield Static(rows, id="help-content")
+                yield Static("  Press Escape or ? to close", id="help-footer")
+
+
+class AddProjectScreen(ModalScreen):
     """Simple modal to add a new project."""
 
     BINDINGS = [

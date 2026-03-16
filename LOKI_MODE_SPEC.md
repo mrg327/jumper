@@ -760,6 +760,224 @@ Phase 7:  [7.1 Bug Fixes]      → ┐
 
 ---
 
+## Phase 8: Plugin Sidebar & Notification Center
+
+**Goal:** Add a modular, extensible plugin area to the bottom-right of the dashboard. Plugins are self-contained widgets that can display info, accept interaction, and run timers. The system ships with a few built-in plugins and is designed so new plugins can be added by dropping a single file.
+
+### Architecture
+
+#### Dashboard Layout Change
+
+Split the dashboard into a two-column layout. The left column (main content) keeps the existing project table, blockers, and journal. The right column is the **plugin sidebar**.
+
+```
+╔══════════════════════════════════════════════╦═══════════════════════╗
+║  jm — Job Manager              Mon Mar 16   ║                       ║
+╠══════════════════════════════════════════════╣  PLUGIN SIDEBAR       ║
+║                                              ║                       ║
+║  ACTIVE PROJECTS                  [5 active] ║  ┌─ Pomodoro ──────┐ ║
+║  ┌──────────┬────────┬─────┬──────────────┐  ║  │ 🍅 17:23 remain │ ║
+║  │ Project  │ Status │ Pri │ Focus        │  ║  │ Session 3 of 4  │ ║
+║  ├──────────┼────────┼─────┼──────────────┤  ║  │ [p]ause [r]eset │ ║
+║  │ HMI      │ active │ hi  │ render loop  │  ║  └─────────────────┘ ║
+║  │ Test Inf │ block  │ med │ PR review    │  ║                       ║
+║  └──────────┴────────┴─────┴──────────────┘  ║  ┌─ Notifications ─┐ ║
+║                                              ║  │ Time for a break │ ║
+║  BLOCKERS                         [2 open]   ║  │ Standup in 10min │ ║
+║  ⊘ HMI: waiting on @carol (2d)              ║  │                   │ ║
+║                                              ║  └─────────────────┘ ║
+║  TODAY'S LOG                                 ║                       ║
+║  09:15  Started: HMI Framework               ║  ┌─ Clock ─────────┐ ║
+║  11:30  Switched → Test Infra                ║  │ 14:23  Tue Mar16 │ ║
+║                                              ║  └─────────────────┘ ║
+╠══════════════════════════════════════════════╩═══════════════════════╣
+║  [w]ork [s]witch [n]ote [b]lock [/]search [f]break [Tab]sidebar [?] ║
+╚═════════════════════════════════════════════════════════════════════╝
+```
+
+#### Plugin System Design
+
+**Plugin base class** (`src/jm/plugins/base.py`):
+
+```python
+from textual.widget import Widget
+
+class JMPlugin(Widget):
+    """Base class for all jm sidebar plugins.
+
+    Subclass this, set PLUGIN_NAME and PLUGIN_DESCRIPTION, and implement
+    compose() to render your plugin. Plugins are self-contained widgets
+    that live in the sidebar.
+
+    Lifecycle:
+    - on_mount(): called when plugin is added to the sidebar
+    - on_plugin_tick(): called every second (for timers, clocks)
+    - on_plugin_focus(): called when user Tabs into the sidebar
+    - notify_user(msg): push a message to the notification plugin
+    """
+
+    PLUGIN_NAME: str = "Plugin"
+    PLUGIN_DESCRIPTION: str = ""
+
+    # If True, this plugin receives per-second tick events
+    NEEDS_TIMER: bool = False
+
+    def notify_user(self, message: str) -> None:
+        """Send a notification to the Notifications plugin."""
+        self.app.post_message(PluginNotification(self, message))
+```
+
+**Plugin registry** (`src/jm/plugins/__init__.py`):
+
+```python
+# Auto-discovers all JMPlugin subclasses in this package.
+# To add a plugin: create a .py file in src/jm/plugins/, define a class
+# extending JMPlugin, and it will appear in the sidebar automatically.
+```
+
+**Plugin loading** — On startup, the sidebar imports all modules in `src/jm/plugins/`, finds subclasses of `JMPlugin`, instantiates them in a configurable order, and mounts them in a vertical stack.
+
+**Plugin ordering** — Controlled by `~/.jm/config.yaml`:
+
+```yaml
+plugins:
+  enabled:
+    - pomodoro
+    - notifications
+    - clock
+  # disabled plugins are not loaded
+```
+
+#### Sidebar Container
+
+**Sidebar widget** (`src/jm/widgets/plugin_sidebar.py`):
+
+- A `Vertical` container holding mounted plugins
+- Has a configurable width (default: 28 cols, min: 20, max: 40)
+- Focusable — `Tab` from the main dashboard area moves focus into the sidebar
+- `Shift+Tab` returns focus to the project table
+- When focused, the sidebar draws a highlighted border
+- Individual plugins can define their own key bindings that are active when focused
+- `Escape` from sidebar returns focus to main area
+
+#### Focus Model
+
+| Key | Context | Action |
+|-----|---------|--------|
+| `Tab` | Main area focused | Move focus to first plugin in sidebar |
+| `Tab` | Sidebar focused | Cycle focus through plugins |
+| `Shift+Tab` | Sidebar focused | Return focus to main area |
+| `Escape` | Sidebar focused | Return focus to main area |
+| Plugin keys | Plugin focused | Plugin-specific actions |
+
+#### Timer Infrastructure
+
+A single `set_interval(1.0)` timer on the sidebar container dispatches `PluginTick` messages to all plugins that have `NEEDS_TIMER = True`. This avoids each plugin running its own timer.
+
+### Agent 8.1 — Plugin Infrastructure (general-purpose)
+
+Implement the plugin system:
+
+1. **`src/jm/plugins/__init__.py`** — Plugin registry with auto-discovery
+2. **`src/jm/plugins/base.py`** — `JMPlugin` base class
+3. **`src/jm/widgets/plugin_sidebar.py`** — Sidebar container, timer dispatch, focus management
+4. **Dashboard layout change** — Split `compose()` into `Horizontal(main_content, sidebar)` layout
+5. **CSS for sidebar** — Border, width, plugin spacing, focus highlight
+6. **Config support** — `plugins.enabled` list in config.yaml
+7. **`Tab`/`Shift+Tab` focus cycling** between main area and sidebar
+
+### Agent 8.2 — Built-in Plugins (general-purpose)
+
+Ship three starter plugins:
+
+#### Clock Plugin (`src/jm/plugins/clock.py`)
+
+```python
+class ClockPlugin(JMPlugin):
+    PLUGIN_NAME = "Clock"
+    NEEDS_TIMER = True
+
+    def compose(self):
+        yield Static(id="clock-display")
+
+    def on_plugin_tick(self):
+        now = datetime.now()
+        self.query_one("#clock-display").update(
+            now.strftime("%H:%M  %a %b %d")
+        )
+```
+
+Single line. Always visible. No interaction needed.
+
+#### Notifications Plugin (`src/jm/plugins/notifications.py`)
+
+- Displays a scrollable list of recent notifications (max 10)
+- Notifications come from other plugins via `notify_user()`
+- Each notification shows timestamp and message
+- Notifications auto-expire after configurable time (default: 30 min)
+- Built-in schedule-based notifications from config:
+
+```yaml
+plugins:
+  notifications:
+    reminders:
+      - time: "09:00"
+        message: "Morning review time"
+      - time: "12:00"
+        message: "Lunch break"
+      - time: "15:00"
+        message: "Afternoon break"
+      - time: "16:45"
+        message: "Start wrapping up"
+```
+
+#### Pomodoro Plugin (`src/jm/plugins/pomodoro.py`)
+
+- Single-line display: `🍅 17:23 remain  (3/4)`
+- Configurable work/break durations (default: 25min work, 5min short break, 15min long break, 4 sessions)
+- When focused, keybindings:
+  - `Space` — start/pause
+  - `r` — reset current session
+  - `R` — reset all sessions
+- On timer complete: sends notification to Notifications plugin ("Work session done — take a break!" / "Break over — back to work!")
+- Logs break to journal automatically when break starts (uses the Break journal entry type)
+- Config:
+
+```yaml
+plugins:
+  pomodoro:
+    work_minutes: 25
+    short_break_minutes: 5
+    long_break_minutes: 15
+    sessions_before_long: 4
+```
+
+### Agent 8.3 — Tests (general-purpose, worktree)
+
+- Plugin base class instantiation and lifecycle
+- Plugin discovery from package
+- Sidebar focus cycling (Tab/Shift+Tab)
+- Clock plugin tick updates display
+- Notifications plugin add/expire
+- Pomodoro timer state machine (work → break → work → long break)
+- Config loading for plugin ordering and settings
+
+**Gate 8 → Done:** Sidebar renders on dashboard with three working plugins. Tab cycles focus between main area and sidebar. Pomodoro timer counts down and sends notifications. Notifications display and auto-expire. Clock shows current time. New plugins can be added by creating a single file in `src/jm/plugins/`. All tests pass.
+
+---
+
+### Updated Agent Parallelization Map (Phase 8)
+
+```
+Phase 0–7:  (completed — see above)
+
+Phase 8:  [8.1 Plugin Infrastructure] → ┐
+          [8.2 Built-in Plugins]       → ├──→ Gate 8 → DONE
+          [8.3 Tests]                  → ┘
+```
+
+---
+
 ## Success Criteria
 
 The tool is done when:
@@ -772,3 +990,6 @@ The tool is done when:
 7. A note can be captured in <5 seconds of user time
 8. **No data loss bugs** — person records merge, blocker moves are atomic, journal entries are consistent
 9. CLI covers full CRUD: `jm add`, `jm list`, `jm note`, `jm block`, `jm status`, `jm done`, `jm work`, `jm switch`, `jm --dump`
+10. **Plugin sidebar** renders on dashboard with clock, notifications, and pomodoro plugins
+11. **Extensibility** — new plugins can be added by creating a single file in `src/jm/plugins/`
+12. **Tab focus** cycles between main dashboard area and plugin sidebar

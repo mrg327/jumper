@@ -24,6 +24,7 @@ class SearchScreen(Screen):
         self.project_store = project_store
         self.search_engine = SearchEngine()
         self.results = []
+        self._search_timer = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -40,12 +41,15 @@ class SearchScreen(Screen):
         self.query_one("#search-input", Input).focus()
 
     def on_input_changed(self, event) -> None:
-        """Live search as user types."""
+        """Live search as user types — debounced."""
         query = event.value.strip()
         if len(query) < 2:
             self._clear_results()
             return
-        self._perform_search(query)
+        # Cancel previous timer if any
+        if self._search_timer is not None:
+            self._search_timer.stop()
+        self._search_timer = self.set_timer(0.2, lambda: self._perform_search(query))
 
     def _perform_search(self, query: str) -> None:
         """Run search and display results."""

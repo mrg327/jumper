@@ -9,6 +9,18 @@ DEFAULT_CONFIG = {
     "categories": ["feature", "bug", "meeting", "research", "decision"],
     "editor": "$EDITOR",
     "export_path": "~/.jm/screen.txt",
+    "plugins": {
+        "enabled": ["pomodoro", "notifications", "clock"],
+        "notifications": {
+            "reminders": [],
+        },
+        "pomodoro": {
+            "work_minutes": 25,
+            "short_break_minutes": 5,
+            "long_break_minutes": 15,
+            "sessions_before_long": 4,
+        },
+    },
 }
 
 

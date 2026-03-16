@@ -75,7 +75,17 @@ class ProjectStore:
             return None
 
     def save_project(self, project: Project) -> Path:
-        """Write a project to disk atomically. Returns the file path."""
+        """Write a project to disk atomically. Returns the file path.
+
+        Automatically adjusts status between active/blocked based on open
+        blockers. Does not touch parked or done statuses.
+        """
+        has_open_blockers = any(not b.resolved for b in project.blockers)
+        if has_open_blockers and project.status == "active":
+            project.status = "blocked"
+        elif not has_open_blockers and project.status == "blocked":
+            project.status = "active"
+
         path = self.projects_dir / f"{project.slug}.md"
         _atomic_write(path, project.to_markdown())
         return path
@@ -182,13 +192,35 @@ class PeopleStore:
     def add_or_update_person(self, person: Person) -> PeopleFile:
         """Add or update a person in the people file.
 
-        If a person with the same handle exists, they are replaced.
+        If a person with the same handle exists, merge the records:
+        - Preserve existing role unless new one is non-empty
+        - Union the projects lists (no duplicates)
+        - Append new pending items (avoid duplicates by description)
         Otherwise the person is appended.
         """
         people = self.load()
         for i, existing in enumerate(people.people):
             if existing.handle == person.handle:
-                people.people[i] = person
+                # Preserve existing role unless new one is non-empty
+                merged_role = person.role if person.role else existing.role
+                # Union projects lists (no duplicates)
+                merged_projects = list(existing.projects)
+                for proj in person.projects:
+                    if proj not in merged_projects:
+                        merged_projects.append(proj)
+                # Append new pending items (avoid duplicates by description)
+                existing_descriptions = {p.description for p in existing.pending}
+                merged_pending = list(existing.pending)
+                for item in person.pending:
+                    if item.description not in existing_descriptions:
+                        merged_pending.append(item)
+                        existing_descriptions.add(item.description)
+                people.people[i] = Person(
+                    handle=existing.handle,
+                    role=merged_role,
+                    projects=merged_projects,
+                    pending=merged_pending,
+                )
                 self.save(people)
                 return people
         people.people.append(person)

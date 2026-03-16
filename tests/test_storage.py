@@ -56,7 +56,7 @@ class TestProjectStore:
         """Filter projects by status."""
         store = ProjectStore(tmp_path)
         store.create_project("Active1", status="active")
-        store.create_project("Blocked1", status="blocked")
+        store.create_project("Parked1", status="parked")
         store.create_project("Active2", status="active")
         active = store.list_projects(status="active")
         assert len(active) == 2
@@ -67,11 +67,11 @@ class TestProjectStore:
         store = ProjectStore(tmp_path)
         project = store.create_project("Test")
         project.current_focus = "new focus"
-        project.status = "blocked"
+        project.status = "parked"
         store.save_project(project)
         reloaded = store.get_project("test")
         assert reloaded.current_focus == "new focus"
-        assert reloaded.status == "blocked"
+        assert reloaded.status == "parked"
 
     def test_delete_project(self, tmp_path):
         """Delete a project removes the file."""

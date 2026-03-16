@@ -28,14 +28,18 @@ def find_last_switch_away(journal_store: JournalStore, project_name: str) -> Opt
             if from_project.lower() == project_name.lower():
                 return entry
 
-    # Check previous days
-    prev = journal_store.get_previous_workday()
-    if prev:
-        for entry in reversed(prev.entries):
-            if entry.entry_type == "Switched" and "\u2192" in entry.project:
-                from_project = entry.project.split("\u2192")[0].strip()
-                if from_project.lower() == project_name.lower():
-                    return entry
+    # Check previous days (up to 14 days back)
+    from datetime import timedelta
+    today = date.today()
+    for days_back in range(1, 15):
+        check_date = today - timedelta(days=days_back)
+        prev = journal_store.get_day(check_date)
+        if prev:
+            for entry in reversed(prev.entries):
+                if entry.entry_type == "Switched" and "\u2192" in entry.project:
+                    from_project = entry.project.split("\u2192")[0].strip()
+                    if from_project.lower() == project_name.lower():
+                        return entry
 
     return None
 

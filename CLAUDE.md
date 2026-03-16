@@ -10,6 +10,9 @@ uv run jm            # Launch TUI
 uv run jm --dump     # Export state to stdout
 uv run jm note "x"   # Quick note without TUI
 uv run jm status     # One-line status
+uv run jm list       # List all projects with slugs
+uv run jm add "Name" # Create project from CLI
+uv run jm done       # Log "done for day", clear active
 ```
 
 ## Testing
@@ -52,7 +55,15 @@ src/jm/
 ├── storage/
 │   ├── store.py           # ProjectStore, JournalStore, PeopleStore (file CRUD)
 │   └── search.py          # Full-text search across markdown files
-├── widgets/               # Reusable Textual widgets
+├── plugins/
+│   ├── __init__.py        # Plugin registry with auto-discovery
+│   ├── base.py            # JMPlugin base class, PluginTick, PluginNotification
+│   ├── clock.py           # Clock plugin (time + date)
+│   ├── notifications.py   # Notification center (scheduled reminders, plugin alerts)
+│   └── pomodoro.py        # Pomodoro timer (work/break cycles)
+├── widgets/
+│   ├── plugin_sidebar.py  # Sidebar container for plugins
+│   └── quick_input.py     # Quick input modals
 ├── styles/
 │   └── app.tcss           # Textual CSS
 └── __main__.py            # Entry point
@@ -95,7 +106,66 @@ Models use `to_markdown()` and `from_markdown()` for serialization.
 | p | People view |
 | a | Add project |
 | Ctrl+E | Export screen |
+| f | Done for day |
+| Tab | Focus plugin sidebar |
 | q | Quit |
+| ? | Help (all keybindings) |
+
+## Project View Keybindings
+
+| Key | Action |
+|-----|--------|
+| Escape | Back to dashboard |
+| e | Edit current focus |
+| S | Cycle status (active/blocked/parked/done) |
+| P | Cycle priority (high/medium/low) |
+| t | Edit tags |
+| T | Edit target date |
+| m | Move/edit blocker |
+| x | Delete project (with confirmation) |
+
+## CLI Commands
+
+| Command | Description |
+|---------|-------------|
+| `jm` | Launch TUI |
+| `jm --dump` | Export state to stdout |
+| `jm --dump -o file` | Export to file |
+| `jm note "text"` | Quick note on active project |
+| `jm block "text"` | Log blocker on active project |
+| `jm work <slug>` | Start working on project |
+| `jm switch <slug>` | Switch active project (non-interactive) |
+| `jm status` | One-line status |
+| `jm list` | List all projects (slug, status, priority, name) |
+| `jm list --status active` | Filter by status |
+| `jm add "Name"` | Create new project |
+| `jm done` | Log "done for day", clear active |
+| `jm set-status <slug> <status>` | Change project status |
+| `jm set-priority <slug> <pri>` | Change project priority |
+
+## Plugin System
+
+The dashboard has a sidebar with extensible plugins. To create a new plugin:
+1. Create a `.py` file in `src/jm/plugins/`
+2. Define a class extending `JMPlugin` from `jm.plugins.base`
+3. Set `PLUGIN_NAME`, `PLUGIN_DESCRIPTION`, and optionally `NEEDS_TIMER = True`
+4. Implement `compose()` to render the widget
+5. Override `on_plugin_tick()` for per-second updates (if `NEEDS_TIMER = True`)
+6. Call `self.notify_user(msg)` to push notifications to the notification center
+
+Built-in plugins: Clock, Notifications, Pomodoro.
+
+Plugin config in `~/.jm/config.yaml`:
+```yaml
+plugins:
+  enabled: [pomodoro, notifications, clock]
+  pomodoro:
+    work_minutes: 25
+  notifications:
+    reminders:
+      - time: "09:00"
+        message: "Morning review"
+```
 
 ## Anti-Requirements (Do NOT Add)
 
@@ -103,7 +173,6 @@ Models use `to_markdown()` and `from_markdown()` for serialization.
 - Databases (SQLite, etc.)
 - Web UI
 - Complex dependency chains
-- Auto-save timers or background processes
 - Anything requiring friction
 
 ## For AI Agents
