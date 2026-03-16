@@ -3,43 +3,28 @@
 from __future__ import annotations
 
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Vertical
 from textual.timer import Timer
-from textual.widget import Widget
 from textual.widgets import Label, Static
 
 from jm.plugins import PluginTick, discover_plugins
 from jm.plugins.base import JMPlugin
 
 
-class PluginSidebar(Widget):
+class PluginSidebar(Vertical):
     """Sidebar container that auto-discovers and mounts plugins.
 
     Dispatches PluginTick messages every second to plugins with NEEDS_TIMER=True.
+    Focus enters via Tab from dashboard, exits via Escape or Shift-Tab.
     """
 
-    DEFAULT_CSS = """
-    PluginSidebar {
-        width: 28;
-        min-width: 20;
-        max-width: 40;
-        height: 100%;
-        border-left: solid $surface-darken-2;
-        padding: 0;
-    }
+    can_focus = False  # Children are focusable, not the container itself
 
-    PluginSidebar:focus-within {
-        border-left: solid $accent;
-    }
-
-    PluginSidebar #sidebar-title {
-        text-style: bold;
-        color: $text-muted;
-        text-align: center;
-        padding: 0 1;
-        margin-bottom: 1;
-    }
-    """
+    BINDINGS = [
+        Binding("escape", "return_focus", "Back", show=False),
+        Binding("shift+tab", "return_focus", "Back", show=False),
+    ]
 
     def __init__(self, enabled_plugins: list[str] | None = None) -> None:
         super().__init__()
@@ -82,3 +67,13 @@ class PluginSidebar(Widget):
         tick = PluginTick()
         for plugin in self._timer_plugins:
             plugin.on_plugin_tick(tick)
+
+    def action_return_focus(self) -> None:
+        """Return focus to the main dashboard area."""
+        from textual.widgets import DataTable
+
+        try:
+            table = self.screen.query_one("#project-table", DataTable)
+            table.focus()
+        except Exception:
+            pass

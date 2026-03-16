@@ -38,6 +38,8 @@ class PomodoroPlugin(JMPlugin):
         Binding("space", "toggle", "Start/Pause"),
         Binding("r", "reset_session", "Reset"),
         Binding("R", "reset_all", "Reset All", key_display="R"),
+        Binding("escape", "return_focus", "Back", show=False),
+        Binding("shift+tab", "return_focus", "Back", show=False),
     ]
 
     DEFAULT_CSS = """
@@ -195,3 +197,13 @@ class PomodoroPlugin(JMPlugin):
         self.session_number = 1
         self.remaining = self.work_seconds
         self._update_display()
+
+    def action_return_focus(self) -> None:
+        """Return focus to the main dashboard area."""
+        from textual.widgets import DataTable
+
+        try:
+            table = self.screen.query_one("#project-table", DataTable)
+            table.focus()
+        except Exception:
+            pass

@@ -127,12 +127,21 @@ class DashboardScreen(Screen):
             break
 
     def action_focus_sidebar(self) -> None:
-        """Move focus to the plugin sidebar."""
+        """Toggle focus between main area and plugin sidebar."""
+        from jm.plugins.base import JMPlugin
         from jm.widgets.plugin_sidebar import PluginSidebar
 
+        focused = self.app.focused
         sidebar = self.query_one(PluginSidebar)
-        # Focus the first focusable plugin in the sidebar
-        focusable = [w for w in sidebar.query("*") if w.can_focus]
+
+        # If focus is already in the sidebar, return to main area
+        if focused is not None and isinstance(focused, JMPlugin):
+            table = self.query_one("#project-table", DataTable)
+            table.focus()
+            return
+
+        # Move focus to first focusable plugin in sidebar
+        focusable = [w for w in sidebar.query(JMPlugin) if w.can_focus]
         if focusable:
             focusable[0].focus()
 
