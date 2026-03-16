@@ -36,6 +36,8 @@ class PomodoroPlugin(JMPlugin):
 
     BINDINGS = [
         Binding("space", "toggle", "Start/Pause"),
+        Binding("plus,equals", "add_time", "+5m", key_display="+"),
+        Binding("minus,underscore", "sub_time", "-5m", key_display="-"),
         Binding("r", "reset_session", "Reset"),
         Binding("R", "reset_all", "Reset All", key_display="R"),
         Binding("escape", "return_focus", "Back", show=False),
@@ -196,6 +198,16 @@ class PomodoroPlugin(JMPlugin):
         self._paused_state = None
         self.session_number = 1
         self.remaining = self.work_seconds
+        self._update_display()
+
+    def action_add_time(self) -> None:
+        """Add 5 minutes to the current timer."""
+        self.remaining += 5 * 60
+        self._update_display()
+
+    def action_sub_time(self) -> None:
+        """Subtract 5 minutes from the current timer (minimum 0)."""
+        self.remaining = max(0, self.remaining - 5 * 60)
         self._update_display()
 
     def action_return_focus(self) -> None:

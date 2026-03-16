@@ -362,6 +362,30 @@ class TestPomodoroPlugin:
         assert plugin.session_number == 1
         assert plugin.remaining == 25 * 60
 
+    def test_add_time(self):
+        from jm.plugins.pomodoro import PomodoroPlugin
+
+        plugin = PomodoroPlugin(work_minutes=25)
+        plugin.remaining = 10 * 60
+        plugin.action_add_time()
+        assert plugin.remaining == 15 * 60
+
+    def test_sub_time(self):
+        from jm.plugins.pomodoro import PomodoroPlugin
+
+        plugin = PomodoroPlugin(work_minutes=25)
+        plugin.remaining = 10 * 60
+        plugin.action_sub_time()
+        assert plugin.remaining == 5 * 60
+
+    def test_sub_time_floors_at_zero(self):
+        from jm.plugins.pomodoro import PomodoroPlugin
+
+        plugin = PomodoroPlugin(work_minutes=25)
+        plugin.remaining = 2 * 60  # 2 minutes
+        plugin.action_sub_time()   # -5 min
+        assert plugin.remaining == 0
+
     def test_display_format_idle(self):
         from jm.plugins.pomodoro import PomodoroPlugin
 
