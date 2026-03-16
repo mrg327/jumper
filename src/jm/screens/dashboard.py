@@ -501,7 +501,16 @@ class DashboardScreen(Screen):
         self.app.push_screen(PeopleScreen(self.people_store, self.project_store))
 
     def action_export(self) -> None:
-        self.notify("Export: not yet implemented")
+        """Export screen dump to file."""
+        from jm.export import export_to_file
+
+        path = export_to_file(
+            self.project_store,
+            self.journal_store,
+            self.people_store,
+            self.active_store,
+        )
+        self.notify(f"Exported to {path}")
 
     def action_help(self) -> None:
         self.notify("Help: not yet implemented")
