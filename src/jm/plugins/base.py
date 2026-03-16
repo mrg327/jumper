@@ -19,6 +19,13 @@ class PluginNotification(Message):
         self.notification_message = message
 
 
+class RequestSidebarOpen(Message):
+    """Posted by plugins to request the sidebar becomes visible.
+
+    Bubbles up to the dashboard which will show the sidebar if hidden.
+    """
+
+
 class JMPlugin(Widget):
     """Base class for all jm sidebar plugins.
 
@@ -30,6 +37,7 @@ class JMPlugin(Widget):
     - on_mount(): called when plugin is added to the sidebar
     - on_plugin_tick(): called every second (for timers, clocks)
     - notify_user(msg): push a message to the notification plugin
+    - request_attention(): request the sidebar to open if hidden
     """
 
     PLUGIN_NAME: str = "Plugin"
@@ -46,11 +54,19 @@ class JMPlugin(Widget):
     """
 
     def notify_user(self, message: str) -> None:
-        """Send a notification to the Notifications plugin."""
+        """Send a notification and request sidebar to open if hidden."""
         try:
             self.post_message(PluginNotification(self, message))
+            self.post_message(RequestSidebarOpen())
         except Exception:
             pass  # Not mounted / no app context
+
+    def request_attention(self) -> None:
+        """Request the sidebar to open if hidden (without sending a notification)."""
+        try:
+            self.post_message(RequestSidebarOpen())
+        except Exception:
+            pass
 
     def on_plugin_tick(self, event: PluginTick) -> None:
         """Override to handle per-second ticks. Only called if NEEDS_TIMER = True."""

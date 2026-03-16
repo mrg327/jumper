@@ -10,12 +10,12 @@ import importlib
 import pkgutil
 from typing import TYPE_CHECKING
 
-from jm.plugins.base import JMPlugin, PluginNotification, PluginTick
+from jm.plugins.base import JMPlugin, PluginNotification, PluginTick, RequestSidebarOpen
 
 if TYPE_CHECKING:
     pass
 
-__all__ = ["JMPlugin", "PluginNotification", "PluginTick", "discover_plugins"]
+__all__ = ["JMPlugin", "PluginNotification", "PluginTick", "RequestSidebarOpen", "discover_plugins"]
 
 
 def discover_plugins() -> list[type[JMPlugin]]:

@@ -29,6 +29,7 @@ class DashboardScreen(Screen):
         Binding("slash", "search", "Search"),
         Binding("r", "review", "Review"),
         Binding("p", "people", "People"),
+        Binding("P", "toggle_sidebar", "Plugins", key_display="P"),
         Binding("a", "add_project", "Add"),
         Binding("ctrl+e", "export", "Export"),
         Binding("f", "take_break", "Break"),
@@ -126,6 +127,25 @@ class DashboardScreen(Screen):
             plugin.add_notification(event.source_name, event.notification_message)
             break
 
+    def on_request_sidebar_open(self, event) -> None:
+        """Show the sidebar when a plugin requests attention."""
+        from jm.widgets.plugin_sidebar import PluginSidebar
+
+        sidebar = self.query_one(PluginSidebar)
+        sidebar.display = True
+
+    def action_toggle_sidebar(self) -> None:
+        """Toggle sidebar visibility with P."""
+        from jm.widgets.plugin_sidebar import PluginSidebar
+
+        sidebar = self.query_one(PluginSidebar)
+        sidebar.display = not sidebar.display
+
+        # If hiding and focus was in sidebar, return focus to main area
+        if not sidebar.display:
+            table = self.query_one("#project-table", DataTable)
+            table.focus()
+
     def action_focus_sidebar(self) -> None:
         """Toggle focus between main area and plugin sidebar."""
         from jm.plugins.base import JMPlugin
@@ -140,7 +160,8 @@ class DashboardScreen(Screen):
             table.focus()
             return
 
-        # Move focus to first focusable plugin in sidebar
+        # Show sidebar if hidden, then focus first plugin
+        sidebar.display = True
         focusable = [w for w in sidebar.query(JMPlugin) if w.can_focus]
         if focusable:
             focusable[0].focus()

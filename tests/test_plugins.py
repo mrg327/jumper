@@ -543,3 +543,14 @@ class TestPluginMessages:
         notif = PluginNotification(plugin, "Test message")
         assert notif.source_name == "Plugin"
         assert notif.notification_message == "Test message"
+
+    def test_request_sidebar_open_message(self):
+        from jm.plugins.base import RequestSidebarOpen
+
+        msg = RequestSidebarOpen()
+        assert msg is not None
+
+    def test_request_sidebar_open_in_exports(self):
+        from jm.plugins import RequestSidebarOpen
+
+        assert RequestSidebarOpen is not None
