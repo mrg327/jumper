@@ -1,0 +1,16 @@
+[package]
+name = "jm-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+indexmap = { version = "2", features = ["serde"] }
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_yml = "0.0.12"
+
+[dev-dependencies]
+tempfile = "3"
+proptest = "1"
