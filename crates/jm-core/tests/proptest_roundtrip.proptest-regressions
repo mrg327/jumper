@@ -1,0 +1,11 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 7af8056f384555935128ba38f9c3f60db48cc98d35c9ffef608ae0381426cfab # shrinks to name = "A ", status = Active, priority = High, tags = []
+cc 6c6c476a79482132de7595effc8153cb370560fb25f130c7e187a51ed20b25db # shrinks to name = "a ", status = Active, priority = High
+cc 47426099ba63f4e2bcb9d5b3c312b19a5efb4647250491236a7b29d0f15e2652 # shrinks to name = "A ", tags = []
+cc 438e20e65b63d8a356380ad975a10452d30f8c7d6d9757d9d942458bf64c7cd8 # shrinks to name = "a", year = 2020, month = 1, day = 1, lines = [" "]
+cc 5eb8df1ef2c48a5ebb2f075f8c227bfdb212a4fe999714ffcd442f4016120b92 # shrinks to name = "aaa  A 0aaa0  A0 A0a0A ? Aa      a"

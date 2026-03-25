@@ -5,68 +5,77 @@ Personal task/project management TUI designed for software engineers juggling pa
 ## Quick Start
 
 ```bash
-uv sync              # Install dependencies
-uv run jm            # Launch TUI
-uv run jm --dump     # Export state to stdout
-uv run jm note "x"   # Quick note without TUI
-uv run jm status     # One-line status
-uv run jm list       # List all projects with slugs
-uv run jm add "Name" # Create project from CLI
-uv run jm done       # Log "done for day", clear active
-```
-
-## Testing
-
-```bash
-uv run pytest        # Run all tests
-uv run pytest -v     # Verbose
-uv run pytest -x     # Stop on first failure
+cargo build --release    # Build release binary
+./build-install.sh       # Build + install to ~/.local/bin/jm
+cargo test               # Run all tests
+jm                       # Launch TUI
+jm --dump                # Export state to stdout
 ```
 
 ## Tech Stack
 
-- **Language**: Python 3.12+
-- **TUI Framework**: Textual (rich terminal UI), Rich (rendering)
+- **Language**: Rust (edition 2024)
+- **TUI Framework**: ratatui + crossterm
+- **CLI**: clap (derive)
+- **Serialization**: serde + serde_yaml (YAML frontmatter in markdown files)
 - **Storage**: Markdown files with YAML frontmatter (human-readable, git-friendly, no DB)
-- **Package Manager**: uv
-- **Data Directory**: ~/.jm/
+- **Data Directory**: `~/.jm/`
 
 ## Project Structure
 
+Cargo workspace with two crates:
+
 ```
-src/jm/
-├── app.py                 # Textual App root
-├── cli.py                 # CLI entry point (argparse)
-├── config.py              # Config from ~/.jm/config.yaml with defaults
-├── export.py              # Screen dump for agent consumption
-├── models/
-│   ├── project.py         # Project dataclass (blockers, decisions, log)
-│   ├── blocker.py         # Blocker dataclass
-│   ├── task.py            # Task dataclass
-│   ├── journal.py         # Daily journal (timestamped entries)
-│   └── person.py          # Stakeholder tracking from @mentions
-├── screens/
-│   ├── dashboard.py       # Main project list view
-│   ├── project_view.py    # Single project details
-│   ├── switch.py          # Context-switch capture modal
-│   ├── review.py          # Morning review screen
-│   ├── search.py          # Full-text search
-│   └── people.py          # Stakeholder view
-├── storage/
-│   ├── store.py           # ProjectStore, JournalStore, PeopleStore (file CRUD)
-│   └── search.py          # Full-text search across markdown files
-├── plugins/
-│   ├── __init__.py        # Plugin registry with auto-discovery
-│   ├── base.py            # JMPlugin base class, PluginTick, PluginNotification
-│   ├── clock.py           # Clock plugin (time + date)
-│   ├── notifications.py   # Notification center (scheduled reminders, plugin alerts)
-│   └── pomodoro.py        # Pomodoro timer (work/break cycles)
-├── widgets/
-│   ├── plugin_sidebar.py  # Sidebar container for plugins
-│   └── quick_input.py     # Quick input modals
-├── styles/
-│   └── app.tcss           # Textual CSS
-└── __main__.py            # Entry point
+crates/
+├── jm-core/                   # Library: models, storage, config, export
+│   └── src/
+│       ├── lib.rs             # Public API (re-exports modules)
+│       ├── config.rs          # Config from ~/.jm/config.yaml
+│       ├── export.rs          # Screen dump for agent consumption
+│       ├── crosslinks.rs      # [[slug]] cross-reference finder
+│       ├── time.rs            # Session time tracking + aggregation
+│       ├── models/
+│       │   ├── mod.rs         # Project, Blocker, LogEntry, JournalEntry, Person, etc.
+│       │   ├── project.rs     # Project with markdown round-trip
+│       │   ├── journal.rs     # Daily journal (timestamped entries)
+│       │   ├── person.rs      # Stakeholder tracking from @mentions
+│       │   ├── inbox.rs       # Quick-capture inbox items
+│       │   └── issue.rs       # Hierarchical issues (parent/child)
+│       └── storage/
+│           ├── mod.rs         # Store trait re-exports
+│           ├── store.rs       # ProjectStore, JournalStore, PeopleStore, etc.
+│           └── search.rs      # Full-text search across markdown files
+└── jm-tui/                    # Binary: TUI app + CLI commands
+    └── src/
+        ├── main.rs            # Entry point, terminal setup, CLI dispatch
+        ├── cli.rs             # Clap CLI definition (all subcommands)
+        ├── app.rs             # Main TUI app loop
+        ├── events.rs          # Event handling, Focus, ScreenId
+        ├── keyhints.rs        # Dynamic keybinding footer bar
+        ├── theme.rs           # Color constants
+        ├── text_utils.rs      # Text wrapping/formatting utilities
+        ├── screens/
+        │   ├── dashboard.rs   # Main project list + kanban view
+        │   ├── project_view.rs # Single project details
+        │   ├── switch.rs      # Context-switch capture modal
+        │   ├── issue_board.rs # Cross-project issue kanban board
+        │   ├── review.rs      # Morning review screen
+        │   ├── search.rs      # Full-text search
+        │   └── people.rs      # Stakeholder view
+        ├── modals/
+        │   ├── input.rs       # Text input modal
+        │   ├── select.rs      # Selection list modal
+        │   ├── confirm.rs     # Confirmation dialog
+        │   └── help.rs        # Help/keybinding reference
+        ├── plugins/
+        │   ├── mod.rs         # Plugin registry
+        │   ├── sidebar.rs     # Sidebar container widget
+        │   ├── clock.rs       # Clock plugin
+        │   ├── notifications.rs # Notification center
+        │   └── pomodoro.rs    # Pomodoro timer
+        └── widgets/
+            ├── empty_state.rs # Empty state placeholder
+            └── toast.rs       # Toast notification widget
 ```
 
 ## Data Format
@@ -76,6 +85,8 @@ All data stored as markdown with YAML frontmatter in `~/.jm/`:
 - **Projects**: `~/.jm/projects/<slug>.md`
 - **Journal**: `~/.jm/journal/YYYY-MM-DD.md` (one per day)
 - **People**: `~/.jm/people.md` (tracking @mentions)
+- **Issues**: `~/.jm/issues/<slug>.md` (per-project issue tracker)
+- **Inbox**: `~/.jm/inbox.md` (quick-capture)
 - **Config**: `~/.jm/config.yaml` (user settings, defaults provided)
 - **Active State**: `~/.jm/.active` (single line: current project slug)
 
@@ -94,12 +105,13 @@ Models use `to_markdown()` and `from_markdown()` for serialization.
 | Key | Action |
 |-----|--------|
 | j/k | Navigate up/down |
+| h/l | Navigate columns (kanban mode) |
 | Enter | Open project |
+| K | Toggle kanban/list view |
 | w | Start working |
 | s | Switch context (capture prompt) |
 | n | Quick note |
 | b | Log blocker |
-| u | Unblock |
 | d | Log decision |
 | / | Search |
 | r | Morning review |
@@ -107,22 +119,38 @@ Models use `to_markdown()` and `from_markdown()` for serialization.
 | a | Add project |
 | Ctrl+E | Export screen |
 | f | Done for day |
+| I | Issue board (cross-project kanban) |
 | Tab | Focus plugin sidebar |
 | q | Quit |
 | ? | Help (all keybindings) |
+
+## Issue Board Keybindings
+
+| Key | Action |
+|-----|--------|
+| h/l | Navigate columns |
+| j/k | Navigate within column |
+| Enter/s | Advance issue status |
+| S | Reverse issue status |
+| c | Close issue (set to Done) |
+| p | Cycle project filter |
+| D | Toggle Done column |
+| o | Open project view |
+| g/G | Jump to top/bottom |
+| Esc | Back to dashboard |
 
 ## Project View Keybindings
 
 | Key | Action |
 |-----|--------|
-| Escape | Back to dashboard |
+| Esc | Back to dashboard |
 | e | Edit current focus |
-| S | Cycle status (active/blocked/parked/done) |
-| P | Cycle priority (high/medium/low) |
-| t | Edit tags |
-| T | Edit target date |
-| m | Move/edit blocker |
-| x | Delete project (with confirmation) |
+| i | Add issue |
+| s | Cycle status |
+| c | Close issue |
+| n | Quick note |
+| b | Log blocker |
+| o | Open in external editor |
 
 ## CLI Commands
 
@@ -134,24 +162,28 @@ Models use `to_markdown()` and `from_markdown()` for serialization.
 | `jm note "text"` | Quick note on active project |
 | `jm block "text"` | Log blocker on active project |
 | `jm work <slug>` | Start working on project |
-| `jm switch <slug>` | Switch active project (non-interactive) |
+| `jm switch <slug>` | Switch active project (with context capture) |
+| `jm switch <slug> --no-capture` | Silent switch (for scripting) |
 | `jm status` | One-line status |
 | `jm list` | List all projects (slug, status, priority, name) |
 | `jm list --status active` | Filter by status |
 | `jm add "Name"` | Create new project |
 | `jm done` | Log "done for day", clear active |
+| `jm done --reflect "..." --tomorrow "..."` | Done with reflection |
+| `jm break [15min\|lunch\|eod]` | Take a break |
+| `jm time [YYYY-MM-DD]` | Show time tracked (today or given date) |
+| `jm standup [YYYY-MM-DD]` | Generate standup report from journal + git |
+| `jm inbox "text"` | Capture quick thought to inbox |
+| `jm refs <slug>` | Show cross-references for a project |
 | `jm set-status <slug> <status>` | Change project status |
 | `jm set-priority <slug> <pri>` | Change project priority |
+| `jm issue "title" [--project slug] [--parent N]` | Add issue to project |
+| `jm issues [--project slug] [--status X] [--all]` | List issues |
+| `jm issue-status <slug> <id> <status>` | Change issue status |
 
 ## Plugin System
 
-The dashboard has a sidebar with extensible plugins. To create a new plugin:
-1. Create a `.py` file in `src/jm/plugins/`
-2. Define a class extending `JMPlugin` from `jm.plugins.base`
-3. Set `PLUGIN_NAME`, `PLUGIN_DESCRIPTION`, and optionally `NEEDS_TIMER = True`
-4. Implement `compose()` to render the widget
-5. Override `on_plugin_tick()` for per-second updates (if `NEEDS_TIMER = True`)
-6. Call `self.notify_user(msg)` to push notifications to the notification center
+The dashboard has a sidebar with extensible plugins.
 
 Built-in plugins: Clock, Notifications, Pomodoro.
 
@@ -167,6 +199,19 @@ plugins:
         message: "Morning review"
 ```
 
+## Testing
+
+```bash
+cargo test                        # All tests
+cargo test -p jm-core             # Core library tests only
+cargo test -p jm-core proptest    # Property-based round-trip tests
+```
+
+Test files in `crates/jm-core/tests/`:
+- `proptest_roundtrip.rs` — property-based markdown round-trip tests
+- `real_data_roundtrip.rs` — real data round-trip verification
+- `storage_edge_cases.rs` — storage edge case coverage
+
 ## Anti-Requirements (Do NOT Add)
 
 - Cloud sync, authentication, multi-user
@@ -177,8 +222,8 @@ plugins:
 
 ## For AI Agents
 
-- Use `uv run jm --dump` to inspect current state
+- Use `jm --dump` (or `cargo run -- --dump`) to inspect current state
 - Models have `to_markdown()` / `from_markdown()` methods for testing
 - All storage is file-based; no server startup needed
-- Textual uses `asyncio`; pytest configured with `asyncio_mode = "auto"`
-- Entry point: `src/jm/cli.py:main()`
+- Entry point: `crates/jm-tui/src/main.rs`
+- Core library API: `crates/jm-core/src/lib.rs`
