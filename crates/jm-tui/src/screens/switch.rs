@@ -36,6 +36,9 @@ pub struct SwitchState {
     pub list_selected: usize,
     /// Case-insensitive substring filter for the project selector.
     pub filter_buffer: String,
+    /// When true, skip the 3-step capture and emit SwitchComplete immediately.
+    #[allow(dead_code)]
+    pub skip_capture: bool,
 }
 
 // ── Init ─────────────────────────────────────────────────────────────
@@ -51,6 +54,25 @@ pub fn init(target_slug: Option<&str>) -> SwitchState {
         cursor_pos: 0,
         list_selected: 0,
         filter_buffer: String::new(),
+        skip_capture: false,
+    }
+}
+
+/// Like `init`, but skips the 3-step capture entirely.
+/// `left_off` is pre-filled with "Meeting" and the wizard starts at Done,
+/// so `handle_key` will emit `Action::SwitchComplete` on the first Enter.
+pub fn init_skip(target_slug: &str) -> SwitchState {
+    SwitchState {
+        step: SwitchStep::Done,
+        target_slug: Some(target_slug.to_string()),
+        left_off: "Meeting".to_string(),
+        blocker: String::new(),
+        next_step: String::new(),
+        input_buffer: String::new(),
+        cursor_pos: 0,
+        list_selected: 0,
+        filter_buffer: String::new(),
+        skip_capture: true,
     }
 }
 

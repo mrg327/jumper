@@ -127,6 +127,9 @@ pub struct Config {
     /// Map of project slug → git repo path (for `jm standup` git log)
     #[serde(default)]
     pub git_paths: HashMap<String, String>,
+    /// Slug of the project used for quick-meeting mode (`m` key).
+    #[serde(default = "default_meetings_project")]
+    pub meetings_project: String,
 }
 
 impl Default for Config {
@@ -139,6 +142,7 @@ impl Default for Config {
             plugins: PluginConfig::default(),
             review: ReviewConfig::default(),
             git_paths: HashMap::new(),
+            meetings_project: default_meetings_project(),
         }
     }
 }
@@ -164,6 +168,9 @@ fn default_priorities() -> Vec<String> {
 }
 fn default_export_path() -> String {
     "~/.jm/screen.txt".to_string()
+}
+fn default_meetings_project() -> String {
+    "generic-tasks-&-meetings".to_string()
 }
 
 impl Config {

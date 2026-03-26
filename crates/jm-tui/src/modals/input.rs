@@ -35,6 +35,8 @@ pub enum InputAction {
     AddIssue,
     /// Add a sub-issue (carries parent issue ID)
     AddSubIssue(u32),
+    /// Quick-meeting mode: capture meeting note on the meetings project
+    MeetingNote,
 }
 
 // ── State ─────────────────────────────────────────────────────────────

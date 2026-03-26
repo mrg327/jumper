@@ -18,7 +18,7 @@ use jm_core::time as jm_time;
 use crate::events::{Action, Focus, ScreenId};
 use crate::modals::{self, InputAction, InputModal, Modal, SelectAction, SelectModal};
 use crate::plugins::PluginSidebar;
-use crate::screens::{dashboard, issue_board, people, project_view, review, search, switch};
+use crate::screens::{dashboard, issue_board, people, project_view, review, search, switch, weekly};
 use crate::widgets::toast::Toast;
 use crate::keyhints;
 
@@ -50,6 +50,7 @@ pub struct App {
     pub search_state: search::SearchState,
     pub people_state: people::PeopleState,
     pub issue_board_state: issue_board::IssueBoardState,
+    pub weekly_state: weekly::WeeklyState,
 
     // Transient
     pub toast: Option<Toast>,
@@ -95,6 +96,7 @@ impl App {
         let dashboard_state = dashboard::init(&project_store);
         let people_state = people::init(&people_store);
         let issue_board_state = issue_board::init(&issue_store);
+        let weekly_state = weekly::init(&journal_store, &issue_store);
         let plugins = PluginSidebar::new(&config);
 
         // Check if we should auto-trigger morning review.
@@ -137,6 +139,7 @@ impl App {
             search_state: search::init(),
             people_state,
             issue_board_state,
+            weekly_state,
 
             toast: None,
             last_tick: Instant::now(),
@@ -320,11 +323,15 @@ impl App {
                             .unwrap_or(true)
                     })
                     .collect();
+                let had_closeout = yesterday.as_ref().map(|j| {
+                    j.entries.iter().any(|e| e.entry_type == "Done" || e.entry_type == "Break")
+                }).unwrap_or(true); // true if no yesterday = nothing to warn about
                 review::render(
                     &self.review_state,
                     yesterday.as_ref(),
                     &all_blockers,
                     &stale,
+                    had_closeout,
                     frame,
                     content_area,
                 );
@@ -342,6 +349,9 @@ impl App {
                     frame,
                     content_area,
                 );
+            }
+            ScreenId::Weekly => {
+                weekly::render(&self.weekly_state, frame, content_area);
             }
         }
 
@@ -456,6 +466,7 @@ impl App {
             ScreenId::Search => search::handle_key(&mut self.search_state, key),
             ScreenId::People => people::handle_key(&mut self.people_state, key),
             ScreenId::IssueBoard => issue_board::handle_key(&mut self.issue_board_state, key),
+            ScreenId::Weekly => weekly::handle_key(&mut self.weekly_state, key),
         }
     }
 
@@ -504,6 +515,9 @@ impl App {
             Action::SwitchContext => {
                 self.screen = ScreenId::Switch(None);
                 self.switch_state = switch::init(None);
+            }
+            Action::MeetingMode => {
+                self.handle_meeting_mode();
             }
             Action::QuickNote => {
                 self.push_input_modal("Quick Note", "Note:", InputAction::QuickNote);
@@ -556,18 +570,26 @@ impl App {
                     .push(Modal::Help(modals::HelpModal::new(screen_name)));
             }
             Action::StopWork => {
-                // Kick off EOD reflection before actually stopping work.
-                self.push_input_modal(
-                    "End of Day — What did you ship today?",
-                    "(Enter to skip)",
-                    InputAction::EodReflectShipped,
-                );
+                self.modal_stack.push(Modal::Select(modals::SelectModal::new(
+                    "Stop Working",
+                    vec![
+                        "15 min break".to_string(),
+                        "Lunch".to_string(),
+                        "Done for day".to_string(),
+                    ],
+                    modals::SelectAction::StopWorkChoice,
+                )));
             }
             Action::Export => self.handle_export(),
 
             Action::OpenIssueBoard => {
                 self.issue_board_state = issue_board::init(&self.issue_store);
                 self.screen = ScreenId::IssueBoard;
+            }
+
+            Action::OpenWeekly => {
+                self.weekly_state = weekly::init(&self.journal_store, &self.issue_store);
+                self.screen = ScreenId::Weekly;
             }
 
             Action::ToggleSidebar => self.sidebar_visible = !self.sidebar_visible,
@@ -682,6 +704,12 @@ impl App {
             }
             Action::CloseIssue => {
                 self.handle_close_issue();
+            }
+            Action::PinIssue => {
+                self.handle_pin_issue();
+            }
+            Action::NoteToIssue => {
+                self.handle_note_to_issue();
             }
 
             Action::PopModal => {
@@ -801,8 +829,14 @@ impl App {
         // they left off before changing projects.
         if let Some(active_slug) = self.active_store.get_active() {
             if active_slug != slug {
-                self.switch_state = switch::init(Some(&slug));
-                self.screen = ScreenId::Switch(Some(slug));
+                // When switching to the meetings project, skip the 3-step capture.
+                if slug == self.config.meetings_project {
+                    self.switch_state = switch::init_skip(&slug);
+                    self.handle_switch_complete();
+                } else {
+                    self.switch_state = switch::init(Some(&slug));
+                    self.screen = ScreenId::Switch(Some(slug));
+                }
                 return;
             }
         }
@@ -828,8 +862,45 @@ impl App {
         dashboard::refresh(&mut self.dashboard, &self.project_store);
     }
 
-    /// Log stop-work journal entry and clear active project.
-    fn handle_stop_work(&mut self) {
+    /// Quick-meeting mode: switch to the meetings project (slim capture) and prompt for meeting topic.
+    fn handle_meeting_mode(&mut self) {
+        let slug = self.config.meetings_project.clone();
+
+        // Verify the meetings project exists.
+        if self.project_store.get_project(&slug).is_none() {
+            self.toast = Some(Toast::new("Meetings project not found"));
+            return;
+        }
+
+        // If a different project is currently active, write a slim "Switched" journal entry.
+        if let Some(active_slug) = self.active_store.get_active() {
+            if active_slug != slug {
+                if let Some(old_project) = self.project_store.get_project(&active_slug) {
+                    let meetings_name = self.project_store
+                        .get_project(&slug)
+                        .map(|p| p.name.clone())
+                        .unwrap_or_else(|| slug.clone());
+                    let time = Local::now().format("%H:%M").to_string();
+                    let switch_label = format!("{} \u{2192} {meetings_name}", old_project.name);
+                    let mut entry = JournalEntry::new(&time, "Switched", &switch_label);
+                    entry.details.insert("left_off".to_string(), "Went to meeting".to_string());
+                    let _ = self.journal_store.append(entry);
+                    // Preserve old project's current_focus — no overwrite.
+                }
+            }
+        }
+
+        // Set meetings project as active.
+        let _ = self.active_store.set_active(&slug);
+
+        // Push input modal for meeting topic.
+        self.push_input_modal("Meeting", "What's the meeting?", InputAction::MeetingNote);
+
+        dashboard::refresh(&mut self.dashboard, &self.project_store);
+    }
+
+    /// Log a break or lunch without clearing active project.
+    fn handle_pause(&mut self, entry_type: &str, toast_msg: &str) {
         let time = Local::now().format("%H:%M").to_string();
         let project_name = self
             .active_store
@@ -842,14 +913,32 @@ impl App {
             })
             .unwrap_or_default();
 
-        let mut entry = JournalEntry::new(&time, "Break", &project_name);
-        entry
-            .details
-            .insert("break".to_string(), "Stopped work".to_string());
+        let entry = JournalEntry::new(&time, entry_type, &project_name);
+        let _ = self.journal_store.append(entry);
+
+        self.toast = Some(Toast::new(toast_msg));
+        dashboard::refresh(&mut self.dashboard, &self.project_store);
+    }
+
+    /// Log end-of-day Done entry and clear active project.
+    fn handle_eod_stop_work(&mut self) {
+        let time = Local::now().format("%H:%M").to_string();
+        let project_name = self
+            .active_store
+            .get_active()
+            .and_then(|slug| {
+                self.project_store
+                    .get_project(&slug)
+                    .map(|p| p.name.clone())
+                    .or(Some(slug))
+            })
+            .unwrap_or_default();
+
+        let entry = JournalEntry::new(&time, "Done", &project_name);
         let _ = self.journal_store.append(entry);
 
         self.active_store.clear_active();
-        self.toast = Some(Toast::new("Work stopped."));
+        self.toast = Some(Toast::new("Done for the day."));
         dashboard::refresh(&mut self.dashboard, &self.project_store);
     }
 
@@ -1021,6 +1110,55 @@ impl App {
             "Close issue",
             labels,
             modals::SelectAction::PickIssueToClose,
+        )));
+    }
+
+    /// Collect the last 10 note lines from a project's log (across all entries).
+    fn collect_recent_notes(project: &jm_core::models::Project) -> Vec<String> {
+        let mut notes: Vec<String> = Vec::new();
+        for entry in &project.log {
+            for line in &entry.lines {
+                notes.push(line.clone());
+            }
+        }
+        // Take the most recent (log is stored newest-first)
+        notes.truncate(10);
+        notes
+    }
+
+    /// Promote a note line to an issue.
+    /// - 0 notes  → toast
+    /// - 1 note   → create issue directly
+    /// - 2+ notes → show picker
+    fn handle_note_to_issue(&mut self) {
+        let Some(slug) = self.targeted_project_slug() else { return };
+        let Some(project) = self.project_store.get_project(&slug) else { return };
+        let notes = Self::collect_recent_notes(&project);
+
+        if notes.is_empty() {
+            self.toast = Some(Toast::new("No notes to convert."));
+            return;
+        }
+
+        if notes.len() == 1 {
+            let text = notes[0].clone();
+            match self.issue_store.create_issue(&slug, &text, None) {
+                Ok(issue) => {
+                    self.toast = Some(Toast::new(&format!("Created issue #{}: {}", issue.id, issue.title)));
+                }
+                Err(e) => {
+                    self.toast = Some(Toast::new(&format!("Error: {e}")));
+                }
+            }
+            return;
+        }
+
+        // 2+ notes: show picker
+        let labels = notes.clone();
+        self.modal_stack.push(Modal::Select(modals::SelectModal::new(
+            "Convert note to issue",
+            labels,
+            modals::SelectAction::NoteToIssue,
         )));
     }
 
@@ -1412,7 +1550,7 @@ impl App {
                     let _ = self.journal_store.append(entry);
                 }
                 // Now do the actual stop-work / EOD cleanup.
-                self.handle_stop_work();
+                self.handle_eod_stop_work();
             }
 
             InputAction::AddIssue => {
@@ -1442,6 +1580,36 @@ impl App {
                             self.toast = Some(Toast::new(&format!("Error: {e}")));
                         }
                     }
+                }
+            }
+
+            InputAction::MeetingNote => {
+                let slug = self.config.meetings_project.clone();
+                if let Some(mut project) = self.project_store.get_project(&slug) {
+                    if !text.is_empty() {
+                        // Add to project log.
+                        let today = Local::now().date_naive();
+                        if let Some(entry) = project.log.iter_mut().find(|e| e.date == today) {
+                            entry.lines.push(text.clone());
+                        } else {
+                            project.log.insert(
+                                0,
+                                LogEntry {
+                                    date: today,
+                                    lines: vec![text.clone()],
+                                },
+                            );
+                        }
+                        let _ = self.project_store.save_project(&mut project);
+
+                        // Journal entry.
+                        let time = Local::now().format("%H:%M").to_string();
+                        let mut entry = JournalEntry::new(&time, "Note", &project.name);
+                        entry.details.insert("note".to_string(), text.clone());
+                        let _ = self.journal_store.append(entry);
+                    }
+                    self.toast = Some(Toast::new(&format!("Meeting: {text}")));
+                    dashboard::refresh(&mut self.dashboard, &self.project_store);
                 }
             }
         }
@@ -1555,6 +1723,70 @@ impl App {
                     }
                 }
             }
+
+            SelectAction::PinIssue => {
+                // Index 0 = clear pin; index 1+ = pin issue at (selected_idx - 1)
+                if let Some(slug) = self.targeted_project_slug() {
+                    if let Some(mut project) = self.project_store.get_project(&slug) {
+                        if selected_idx == 0 {
+                            project.active_issue = None;
+                            let _ = self.project_store.save_project(&mut project);
+                            dashboard::refresh(&mut self.dashboard, &self.project_store);
+                            self.toast = Some(Toast::new("Active issue pin cleared."));
+                        } else {
+                            let issue_file = self.issue_store.load(&slug);
+                            let open_issues: Vec<&jm_core::models::Issue> = issue_file
+                                .issues
+                                .iter()
+                                .filter(|i| i.status != jm_core::models::IssueStatus::Done)
+                                .collect();
+                            if let Some(issue) = open_issues.get(selected_idx - 1) {
+                                let issue_id = issue.id;
+                                let issue_title = issue.title.clone();
+                                project.active_issue = Some(issue_id);
+                                let _ = self.project_store.save_project(&mut project);
+                                dashboard::refresh(&mut self.dashboard, &self.project_store);
+                                self.toast = Some(Toast::new(&format!("Pinned #{issue_id} {issue_title}")));
+                            }
+                        }
+                    }
+                }
+            }
+            SelectAction::NoteToIssue => {
+                if let Some(slug) = self.targeted_project_slug() {
+                    if let Some(project) = self.project_store.get_project(&slug) {
+                        let notes = Self::collect_recent_notes(&project);
+                        if let Some(text) = notes.get(selected_idx) {
+                            let text = text.clone();
+                            match self.issue_store.create_issue(&slug, &text, None) {
+                                Ok(issue) => {
+                                    self.toast = Some(Toast::new(&format!(
+                                        "Created issue #{}: {}",
+                                        issue.id, issue.title
+                                    )));
+                                }
+                                Err(e) => {
+                                    self.toast = Some(Toast::new(&format!("Error: {e}")));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            SelectAction::StopWorkChoice => {
+                match selected_idx {
+                    0 => self.handle_pause("Break", "Break logged."),
+                    1 => self.handle_pause("Lunch", "Lunch logged."),
+                    2 => {
+                        self.push_input_modal(
+                            "End of Day — What did you ship today?",
+                            "(Enter to skip)",
+                            InputAction::EodReflectShipped,
+                        );
+                    }
+                    _ => {}
+                }
+            }
         }
     }
 
@@ -1637,6 +1869,47 @@ impl App {
                 dashboard::refresh(&mut self.dashboard, &self.project_store);
             } else {
                 self.toast = Some(Toast::new("Failed to delete project."));
+            }
+        }
+    }
+
+    /// Handle the PinIssue action — pin (or clear) the active issue for the current project.
+    fn handle_pin_issue(&mut self) {
+        let Some(slug) = self.targeted_project_slug() else {
+            return;
+        };
+        let issue_file = self.issue_store.load(&slug);
+        let open_issues: Vec<&jm_core::models::Issue> = issue_file
+            .issues
+            .iter()
+            .filter(|i| i.status != jm_core::models::IssueStatus::Done)
+            .collect();
+
+        match open_issues.len() {
+            0 => {
+                self.toast = Some(Toast::new("No open issues to pin."));
+            }
+            1 => {
+                let issue_id = open_issues[0].id;
+                let issue_title = open_issues[0].title.clone();
+                if let Some(mut project) = self.project_store.get_project(&slug) {
+                    project.active_issue = Some(issue_id);
+                    let _ = self.project_store.save_project(&mut project);
+                    dashboard::refresh(&mut self.dashboard, &self.project_store);
+                    self.toast = Some(Toast::new(&format!("Pinned #{issue_id} {issue_title}")));
+                }
+            }
+            _ => {
+                // Build items list: first entry is "Clear pin", then open issues
+                let mut items = vec!["Clear pin".to_string()];
+                for issue in &open_issues {
+                    items.push(format!("#{} {}", issue.id, issue.title));
+                }
+                self.modal_stack.push(Modal::Select(SelectModal::new(
+                    "Pin Active Issue",
+                    items,
+                    SelectAction::PinIssue,
+                )));
             }
         }
     }
@@ -1884,7 +2157,7 @@ impl App {
             }
 
             "done" => {
-                self.handle_stop_work();
+                self.handle_eod_stop_work();
             }
 
             "work" => {
@@ -2031,8 +2304,14 @@ impl App {
                 return;
             }
             // Different project active — route through context-switch wizard.
-            self.switch_state = switch::init(Some(slug));
-            self.screen = ScreenId::Switch(Some(slug.to_string()));
+            // When switching to the meetings project, skip the 3-step capture.
+            if slug == self.config.meetings_project {
+                self.switch_state = switch::init_skip(slug);
+                self.handle_switch_complete();
+            } else {
+                self.switch_state = switch::init(Some(slug));
+                self.screen = ScreenId::Switch(Some(slug.to_string()));
+            }
             return;
         }
         let _ = self.active_store.set_active(slug);

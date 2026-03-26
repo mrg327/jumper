@@ -111,7 +111,7 @@ fn render_detail(
     ]);
 
     let hint = Line::from(vec![Span::styled(
-        " e:focus  i:issue  s/r:cycle  c:close  K:kanban  S:status  P:priority  n:note  b:blocker  Esc:back ",
+        " e:focus  i:issue  s/r:cycle  c:close  x:pin  K:kanban  S:status  P:priority  n:note  b:blocker  Esc:back ",
         theme::dim(),
     )]);
 
@@ -268,9 +268,11 @@ fn handle_key_detail(
         KeyCode::Char('P') => Action::CyclePriority,
         KeyCode::Char('t') => Action::EditTags,
         KeyCode::Char('T') => Action::EditTarget,
-        KeyCode::Char('x') => Action::DeleteProject,
+        KeyCode::Char('X') => Action::DeleteProject,
+        KeyCode::Char('x') => Action::PinIssue,
         KeyCode::Char('m') => Action::MoveBlocker,
         KeyCode::Char('n') => Action::QuickNote,
+        KeyCode::Char('N') => Action::NoteToIssue,
         KeyCode::Char('b') => Action::QuickBlocker,
         KeyCode::Char('o') => Action::OpenEditor,
         KeyCode::Char('i') => Action::AddIssue,
@@ -370,6 +372,22 @@ fn build_lines<'a>(project: &'a Project, references: &[(String, String)], issue_
 
     lines.push(Line::raw(""));
 
+    // ── Active issue pin ────────────────────────────────────────────
+    if let Some(pinned_id) = project.active_issue {
+        let title = issue_file
+            .and_then(|f| f.issues.iter().find(|i| i.id == pinned_id))
+            .map(|i| i.title.as_str())
+            .unwrap_or("(unknown)");
+        lines.push(Line::from(vec![
+            Span::styled("▶ Active: ", Style::default().fg(theme::TEXT_ACCENT)),
+            Span::styled(
+                format!("#{pinned_id} {title}"),
+                Style::default().fg(theme::TEXT_ACCENT).add_modifier(Modifier::BOLD),
+            ),
+        ]));
+        lines.push(Line::raw(""));
+    }
+
     // ── Focus section ───────────────────────────────────────────────
     push_section_header(&mut lines, "Focus", 0);
     if project.current_focus.is_empty() {
@@ -437,14 +455,31 @@ fn build_lines<'a>(project: &'a Project, references: &[(String, String)], issue_
 
     lines.push(Line::raw(""));
 
-    // ── Decisions section ───────────────────────────────────────────
-    push_section_header(&mut lines, "Decisions", 2);
-    if project.decisions.is_empty() {
+    // ── Log section ─────────────────────────────────────────────────
+    push_section_header(&mut lines, "Log", 3);
+    if project.log.is_empty() {
         lines.push(Line::from(vec![Span::styled(
-            "  No decisions logged.",
+            "  No entries. Press n to add a note.",
             theme::empty_hint(),
         )]));
     } else {
+        for entry in &project.log {
+            // Date header
+            lines.push(Line::from(vec![
+                Span::raw("  "),
+                Span::styled(entry.date.to_string(), theme::timestamp_style()),
+            ]));
+            for log_line in &entry.lines {
+                lines.push(Line::from(render_with_links(&format!("   - {log_line}"))));
+            }
+        }
+    }
+
+    lines.push(Line::raw(""));
+
+    // ── Decisions section (only shown when non-empty) ────────────────
+    if !project.decisions.is_empty() {
+        push_section_header(&mut lines, "Decisions", 2);
         for decision in &project.decisions {
             // Date: Choice
             let mut spans: Vec<Span<'static>> = Vec::new();
@@ -467,31 +502,8 @@ fn build_lines<'a>(project: &'a Project, references: &[(String, String)], issue_
                 ]));
             }
         }
+        lines.push(Line::raw(""));
     }
-
-    lines.push(Line::raw(""));
-
-    // ── Log section ─────────────────────────────────────────────────
-    push_section_header(&mut lines, "Log", 3);
-    if project.log.is_empty() {
-        lines.push(Line::from(vec![Span::styled(
-            "  No entries. Press n to add a note.",
-            theme::empty_hint(),
-        )]));
-    } else {
-        for entry in &project.log {
-            // Date header
-            lines.push(Line::from(vec![
-                Span::raw("  "),
-                Span::styled(entry.date.to_string(), theme::timestamp_style()),
-            ]));
-            for log_line in &entry.lines {
-                lines.push(Line::from(render_with_links(&format!("   - {log_line}"))));
-            }
-        }
-    }
-
-    lines.push(Line::raw(""));
 
     // ── Referenced by section ───────────────────────────────────────
     if !references.is_empty() {
@@ -936,10 +948,18 @@ mod tests {
     }
 
     #[test]
-    fn test_x_returns_delete_project() {
+    fn test_x_returns_pin_issue() {
         let mut state = make_state();
         let project = make_project();
         let action = handle_key(&mut state, key(KeyCode::Char('x')), &project);
+        assert!(matches!(action, Action::PinIssue));
+    }
+
+    #[test]
+    fn test_shift_x_returns_delete_project() {
+        let mut state = make_state();
+        let project = make_project();
+        let action = handle_key(&mut state, key(KeyCode::Char('X')), &project);
         assert!(matches!(action, Action::DeleteProject));
     }
 

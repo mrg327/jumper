@@ -97,9 +97,11 @@ fn get_hints(screen: &ScreenId, focus: &Focus, has_modal: bool, is_kanban: bool)
             ("Enter", "open"),
             ("w", "work"),
             ("s", "switch"),
+            ("m", "meeting"),
             ("n", "note"),
             ("b", "block"),
             ("/", "search"),
+            ("W", "weekly"),
             ("?", "help"),
         ],
         ScreenId::ProjectView(_) => vec![
@@ -109,6 +111,7 @@ fn get_hints(screen: &ScreenId, focus: &Focus, has_modal: bool, is_kanban: bool)
             ("s", "cycle"),
             ("c", "close"),
             ("n", "note"),
+            ("N", "note→issue"),
             ("b", "block"),
             ("o", "editor"),
         ],
@@ -138,6 +141,11 @@ fn get_hints(screen: &ScreenId, focus: &Focus, has_modal: bool, is_kanban: bool)
             ("c", "close"),
             ("p", "filter"),
             ("D", "done col"),
+            ("Esc", "back"),
+        ],
+        ScreenId::Weekly => vec![
+            ("Tab", "section"),
+            ("j/k", "nav"),
             ("Esc", "back"),
         ],
     }

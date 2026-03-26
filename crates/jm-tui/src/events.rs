@@ -22,6 +22,7 @@ pub enum ScreenId {
     Search,
     People,
     IssueBoard,
+    Weekly,
 }
 
 /// Modal types that can be pushed onto the popup stack.
@@ -70,6 +71,7 @@ pub enum Action {
     // Dashboard actions
     StartWork,
     SwitchContext,
+    MeetingMode,
     QuickNote,
     QuickBlocker,
     QuickDecision,
@@ -90,6 +92,9 @@ pub enum Action {
     // Issue board
     OpenIssueBoard,
 
+    // Weekly review
+    OpenWeekly,
+
     // Project view actions
     EditFocus,
     CycleStatus,
@@ -105,6 +110,8 @@ pub enum Action {
     CycleIssueStatus,
     CycleIssueStatusReverse,
     CloseIssue,
+    PinIssue,
+    NoteToIssue,
 
     // Open project file in $EDITOR
     OpenEditor,          // from ProjectView: open current project (o)

@@ -215,6 +215,7 @@ fn handle_key_list(state: &mut DashboardState, key: KeyEvent) -> Action {
         // ── Dashboard actions ────────────────────────────────────────
         KeyCode::Char('w') => Action::StartWork,
         KeyCode::Char('s') => Action::SwitchContext,
+        KeyCode::Char('m') => Action::MeetingMode,
         KeyCode::Char('n') => Action::QuickNote,
         KeyCode::Char('b') => Action::QuickBlocker,
         KeyCode::Char('d') => Action::QuickDecision,
@@ -226,6 +227,7 @@ fn handle_key_list(state: &mut DashboardState, key: KeyEvent) -> Action {
         KeyCode::Char('i') => Action::AddIssue,
         KeyCode::Char('f') => Action::StopWork,
         KeyCode::Char('I') => Action::OpenIssueBoard,
+        KeyCode::Char('W') => Action::OpenWeekly,
         KeyCode::Char('?') => Action::Help,
         KeyCode::Char('q') => Action::Quit,
 
@@ -292,9 +294,11 @@ fn handle_key_kanban(state: &mut DashboardState, key: KeyEvent) -> Action {
         }
         // Common actions
         KeyCode::Char('w') => Action::StartWork,
+        KeyCode::Char('m') => Action::MeetingMode,
         KeyCode::Char('a') => Action::AddProject,
         KeyCode::Char('i') => Action::AddIssue,
         KeyCode::Char('I') => Action::OpenIssueBoard,
+        KeyCode::Char('W') => Action::OpenWeekly,
         KeyCode::Char('?') => Action::Help,
         KeyCode::Char('q') => Action::Quit,
         KeyCode::Char('P') => Action::ToggleSidebar,
@@ -505,12 +509,31 @@ fn render_preview(
             ),
         ]));
 
+        // Show pinned active issue first (if set)
+        let mut pinned_id_shown: Option<u32> = None;
+        if let Some(pinned_id) = project.active_issue {
+            if let Some(pinned) = issue_file.issues.iter().find(|i| i.id == pinned_id && i.status != IssueStatus::Done) {
+                lines.push(Line::from(vec![
+                    Span::styled("▶ ", Style::default().fg(theme::TEXT_ACCENT)),
+                    Span::styled(
+                        format!("#{} {}", pinned.id, pinned.title),
+                        Style::default().fg(theme::TEXT_ACCENT),
+                    ),
+                ]));
+                pinned_id_shown = Some(pinned_id);
+            }
+        }
+
         let cm = issue_file.children_map();
         let top_issues = cm.get(&None).cloned().unwrap_or_default();
-        let mut shown = 0usize;
+        let mut shown = if pinned_id_shown.is_some() { 1 } else { 0 };
         const MAX_ISSUES: usize = 8;
         'outer: for issue in &top_issues {
             if issue.status == IssueStatus::Done {
+                continue;
+            }
+            // Skip the pinned issue — already shown above
+            if pinned_id_shown == Some(issue.id) {
                 continue;
             }
             lines.push(build_preview_issue_line(issue, false));

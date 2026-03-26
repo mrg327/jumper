@@ -152,6 +152,7 @@ pub struct Project {
     pub tags: Vec<String>,
     pub created: NaiveDate,
     pub target: Option<NaiveDate>,
+    pub active_issue: Option<u32>,
     pub current_focus: String,
     pub blockers: Vec<Blocker>,
     pub decisions: Vec<Decision>,
@@ -169,6 +170,7 @@ impl Project {
             tags: Vec::new(),
             created: chrono::Local::now().date_naive(),
             target: None,
+            active_issue: None,
             current_focus: String::new(),
             blockers: Vec::new(),
             decisions: Vec::new(),
@@ -199,6 +201,9 @@ impl Project {
         }
         if let Some(target) = self.target {
             out.push_str(&format!("target: '{}'\n", target));
+        }
+        if let Some(active_issue) = self.active_issue {
+            out.push_str(&format!("active_issue: {}\n", active_issue));
         }
         out.push_str("---");
 
@@ -298,6 +303,7 @@ impl Project {
         let created = meta_date(&meta, "created")
             .unwrap_or_else(|| chrono::Local::now().date_naive());
         let target = meta_date(&meta, "target");
+        let active_issue = meta_u32(&meta, "active_issue");
 
         // Use provided slug (filename) as authoritative; fall back to name-derived slug
         let derived_slug = name.to_lowercase().replace(' ', "-");
@@ -351,6 +357,7 @@ impl Project {
             tags,
             created,
             target,
+            active_issue,
             current_focus,
             blockers,
             decisions,
@@ -563,6 +570,15 @@ fn meta_date(meta: &serde_yml::Value, key: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(&s, "%Y-%m-%d").ok()
 }
 
+/// Get an optional u32 from YAML metadata.
+fn meta_u32(meta: &serde_yml::Value, key: &str) -> Option<u32> {
+    meta.get(key).and_then(|v| match v {
+        serde_yml::Value::Number(n) => n.as_u64().map(|n| n as u32),
+        serde_yml::Value::String(s) => s.parse().ok(),
+        _ => None,
+    })
+}
+
 /// Get a list of strings from YAML metadata.
 fn meta_string_list(meta: &serde_yml::Value, key: &str) -> Vec<String> {
     match meta.get(key) {
@@ -618,6 +634,7 @@ mod tests {
             tags: vec!["infotainment".to_string(), "rendering".to_string()],
             created: d(2026, 1, 15),
             target: Some(d(2026, 6, 30)),
+            active_issue: None,
             current_focus: "debugging render loop".to_string(),
             blockers: vec![
                 Blocker {

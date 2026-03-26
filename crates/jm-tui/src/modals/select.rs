@@ -31,6 +31,12 @@ pub enum SelectAction {
     PickIssueToCycleReverse,
     /// User is picking an issue to close.
     PickIssueToClose,
+    /// User is picking an issue to pin as the active issue for the project.
+    PinIssue,
+    /// User is picking a note line to convert to an issue.
+    NoteToIssue,
+    /// User is choosing break type from the stop-work menu.
+    StopWorkChoice,
 }
 
 // ── State ─────────────────────────────────────────────────────────────

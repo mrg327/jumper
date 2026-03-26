@@ -59,6 +59,7 @@ crates/
         │   ├── project_view.rs # Single project details
         │   ├── switch.rs      # Context-switch capture modal
         │   ├── issue_board.rs # Cross-project issue kanban board
+        │   ├── weekly.rs      # Weekly review with activity chart
         │   ├── review.rs      # Morning review screen
         │   ├── search.rs      # Full-text search
         │   └── people.rs      # Stakeholder view
@@ -118,8 +119,10 @@ Models use `to_markdown()` and `from_markdown()` for serialization.
 | p | People view |
 | a | Add project |
 | Ctrl+E | Export screen |
-| f | Done for day |
+| m | Quick meeting switch |
+| f | Stop / break / done for day |
 | I | Issue board (cross-project kanban) |
+| W | Weekly review |
 | Tab | Focus plugin sidebar |
 | q | Quit |
 | ? | Help (all keybindings) |
@@ -139,13 +142,25 @@ Models use `to_markdown()` and `from_markdown()` for serialization.
 | g/G | Jump to top/bottom |
 | Esc | Back to dashboard |
 
+## Weekly Review Keybindings
+
+| Key | Action |
+|-----|--------|
+| Tab | Cycle sections |
+| j/k | Navigate within section |
+| g/G | Jump to top/bottom |
+| W | Toggle back to dashboard |
+| Esc/q | Back to dashboard |
+
 ## Project View Keybindings
 
 | Key | Action |
 |-----|--------|
-| Esc | Back to dashboard |
+| Esc/q | Back to dashboard |
 | e | Edit current focus |
+| x | Pin active issue |
 | i | Add issue |
+| N | Note to issue |
 | s | Cycle status |
 | c | Close issue |
 | n | Quick note |

@@ -142,6 +142,7 @@ fn test_save_get_project_full_fields() {
         tags: vec!["infra".to_string(), "critical".to_string()],
         created: d(2026, 1, 1),
         target: Some(d(2026, 12, 31)),
+        active_issue: None,
         current_focus: "Writing comprehensive tests".to_string(),
         blockers: vec![
             Blocker {

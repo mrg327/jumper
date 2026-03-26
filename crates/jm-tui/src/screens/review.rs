@@ -105,6 +105,7 @@ pub fn render(
     yesterday: Option<&DailyJournal>,
     blockers: &[(String, Blocker)],
     stale: &[Project],
+    had_closeout: bool,
     frame: &mut Frame,
     area: Rect,
 ) {
@@ -130,10 +131,10 @@ pub fn render(
         let [commit_area, eod_area] =
             Layout::horizontal([Constraint::Ratio(1, 2), Constraint::Ratio(1, 2)])
                 .areas(top_area);
-        render_commitments(state, &commitments, yesterday, frame, commit_area);
+        render_commitments(state, &commitments, yesterday, had_closeout, frame, commit_area);
         render_eod_reflection(eod_reflection.as_ref(), frame, eod_area);
     } else {
-        render_commitments(state, &commitments, yesterday, frame, top_area);
+        render_commitments(state, &commitments, yesterday, had_closeout, frame, top_area);
     }
 
     // Bottom: yesterday entries | blockers | stale
@@ -215,6 +216,7 @@ fn render_commitments(
     state: &ReviewState,
     commitments: &[Commitment],
     yesterday: Option<&DailyJournal>,
+    had_closeout: bool,
     frame: &mut Frame,
     area: Rect,
 ) {
@@ -237,18 +239,33 @@ fn render_commitments(
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    // Collect lines to render; warning goes first if no close-out
+    let mut display_items: Vec<ListItem> = Vec::new();
+
+    if !had_closeout && yesterday.is_some() {
+        display_items.push(ListItem::new(Line::from(Span::styled(
+            "\u{26a0} Yesterday ended without a close-out",
+            Style::default().fg(theme::TEXT_WARNING),
+        ))));
+    }
+
     if commitments.is_empty() {
-        frame.render_widget(
-            Paragraph::new(Span::styled(
-                "No commitments recorded yesterday.",
-                theme::dim(),
-            )),
-            inner,
-        );
+        if display_items.is_empty() {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    "No commitments recorded yesterday.",
+                    theme::dim(),
+                )),
+                inner,
+            );
+            return;
+        }
+        // Show warning but nothing else
+        frame.render_widget(List::new(display_items), inner);
         return;
     }
 
-    let items: Vec<ListItem> = commitments
+    let commitment_items: Vec<ListItem> = commitments
         .iter()
         .enumerate()
         .map(|(i, c)| {
@@ -267,7 +284,8 @@ fn render_commitments(
         })
         .collect();
 
-    frame.render_widget(List::new(items), inner);
+    display_items.extend(commitment_items);
+    frame.render_widget(List::new(display_items), inner);
 }
 
 fn render_eod_reflection(

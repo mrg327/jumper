@@ -178,16 +178,16 @@ fn dashboard_entries() -> Vec<(&'static str, &'static str)> {
         ("Enter",        "Open project"),
         ("w",            "Start working"),
         ("s",            "Switch context (capture prompt)"),
+        ("m",            "Quick meeting switch"),
         ("n",            "Quick note"),
         ("b",            "Log blocker"),
-        ("d",            "Log decision"),
-        ("u",            "Unblock"),
         ("",             ""),
         // Views
         ("/",            "Search"),
         ("r",            "Morning review"),
         ("p",            "People view"),
         ("I",            "Issue board"),
+        ("W",            "Weekly review"),
         ("K",            "Toggle kanban / list view"),
         ("a",            "Add project"),
         ("i",            "Add issue to project"),
@@ -201,6 +201,10 @@ fn dashboard_entries() -> Vec<(&'static str, &'static str)> {
         ("Ctrl+E",       "Export screen"),
         ("q",            "Quit"),
         ("?",            "This help"),
+        ("",             ""),
+        // Advanced / rarely used
+        ("d",            "Log decision"),
+        ("u",            "Unblock"),
     ]
 }
 
@@ -226,6 +230,7 @@ fn project_view_entries() -> Vec<(&'static str, &'static str)> {
         ("",             ""),
         // Notes & blockers
         ("n",            "Quick note"),
+        ("N",            "Note → issue"),
         ("b",            "Log blocker"),
         ("d",            "Log decision"),
         ("u",            "Unblock"),
@@ -234,7 +239,10 @@ fn project_view_entries() -> Vec<(&'static str, &'static str)> {
         // Cross-links
         ("",             "Use [[slug]] in notes to cross-link projects"),
         ("",             ""),
+        // Issues (pin)
+        ("x",            "Pin active issue"),
+        ("",             ""),
         // Danger
-        ("x",            "Delete project (confirmation required)"),
+        ("X",            "Delete project (confirmation required)"),
     ]
 }
