@@ -15,16 +15,18 @@ use crate::theme;
 /// `screen` is the current screen, `focus` is the current focus state,
 /// `has_modal` indicates if a modal is open on top.
 /// `status_spans` are rendered right-aligned (switch count, session timer, etc.)
+/// `plugin_hints` are the key hints from the active screen plugin, if any.
 pub fn render(
     screen: &ScreenId,
     focus: &Focus,
     has_modal: bool,
     is_kanban: bool,
     status_spans: &[Span],
+    plugin_hints: Option<Vec<(&'static str, &'static str)>>,
     frame: &mut Frame,
     area: Rect,
 ) {
-    let hints = get_hints(screen, focus, has_modal, is_kanban);
+    let hints = get_hints(screen, focus, has_modal, is_kanban, plugin_hints);
 
     // Render as a single line: "key:action  key:action  key:action"
     // Keys in bold/accent, descriptions in dim gray.
@@ -62,7 +64,13 @@ pub fn render(
     frame.render_widget(para, area);
 }
 
-fn get_hints(screen: &ScreenId, focus: &Focus, has_modal: bool, is_kanban: bool) -> Vec<(&'static str, &'static str)> {
+fn get_hints(
+    screen: &ScreenId,
+    focus: &Focus,
+    has_modal: bool,
+    is_kanban: bool,
+    plugin_hints: Option<Vec<(&'static str, &'static str)>>,
+) -> Vec<(&'static str, &'static str)> {
     // Modal open — only submit/cancel are relevant.
     if has_modal {
         return vec![
@@ -84,6 +92,10 @@ fn get_hints(screen: &ScreenId, focus: &Focus, has_modal: bool, is_kanban: bool)
 
     // Screen-specific hints for the main panel.
     match screen {
+        ScreenId::Plugin(_) => {
+            // Return hints provided by the active screen plugin, or a minimal fallback.
+            plugin_hints.unwrap_or_else(|| vec![("Esc", "back")])
+        }
         ScreenId::Dashboard if is_kanban => vec![
             ("h/l", "column"),
             ("j/k", "nav"),

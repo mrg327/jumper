@@ -17,7 +17,7 @@ use jm_core::time as jm_time;
 
 use crate::events::{Action, Focus, ScreenId};
 use crate::modals::{self, InputAction, InputModal, Modal, SelectAction, SelectModal};
-use crate::plugins::PluginSidebar;
+use crate::plugins::{PluginAction, PluginRegistry};
 use crate::screens::{dashboard, issue_board, people, project_view, review, search, switch, weekly};
 use crate::widgets::toast::Toast;
 use crate::keyhints;
@@ -38,7 +38,7 @@ pub struct App {
     // UI state
     pub screen: ScreenId,
     pub modal_stack: Vec<Modal>,
-    pub plugins: PluginSidebar,
+    pub plugin_registry: PluginRegistry,
     pub sidebar_visible: bool,
     pub focus: Focus,
 
@@ -55,6 +55,7 @@ pub struct App {
     // Transient
     pub toast: Option<Toast>,
     pub last_tick: Instant,
+    pub last_screen_tick: Instant,
     pub should_quit: bool,
 
     // Idle reminder
@@ -97,7 +98,7 @@ impl App {
         let people_state = people::init(&people_store);
         let issue_board_state = issue_board::init(&issue_store);
         let weekly_state = weekly::init(&journal_store, &issue_store);
-        let plugins = PluginSidebar::new(&config);
+        let plugin_registry = PluginRegistry::new(&config);
 
         // Check if we should auto-trigger morning review.
         let morning_start = config.review.morning_start;
@@ -128,7 +129,7 @@ impl App {
 
             screen: initial_screen,
             modal_stack: Vec::new(),
-            plugins,
+            plugin_registry,
             sidebar_visible: true,
             focus: Focus::Main,
 
@@ -143,6 +144,7 @@ impl App {
 
             toast: None,
             last_tick: Instant::now(),
+            last_screen_tick: Instant::now(),
             should_quit: false,
 
             idle_dismissed_at: None,
@@ -204,10 +206,22 @@ impl App {
                 }
             }
 
-            // 1-second tick for plugins
+            // 1-second tick for sidebar plugins
             if self.last_tick.elapsed() >= Duration::from_secs(1) {
                 self.last_tick = Instant::now();
                 self.update(Action::Tick);
+            }
+
+            // 250ms tick for the active screen plugin only
+            if self.last_screen_tick.elapsed() >= Duration::from_millis(250) {
+                self.last_screen_tick = Instant::now();
+                let screen = self.screen.clone();
+                if let ScreenId::Plugin(name) = screen {
+                    let msgs = self.plugin_registry.tick_screen(&name);
+                    for msg in msgs {
+                        self.plugin_registry.sidebar.push_notification(&msg);
+                    }
+                }
             }
 
             // Expire toast
@@ -247,8 +261,10 @@ impl App {
         ])
         .areas(frame.area());
 
-        // Split main area for sidebar if visible
-        let (content_area, sidebar_area) = if self.sidebar_visible {
+        // Split main area for sidebar if visible.
+        // Sidebar is HIDDEN when a screen plugin is active — plugin gets full width.
+        let is_plugin_screen = matches!(self.screen, ScreenId::Plugin(_));
+        let (content_area, sidebar_area) = if self.sidebar_visible && !is_plugin_screen {
             let [content, sidebar] = Layout::horizontal([
                 Constraint::Fill(1),
                 Constraint::Length(22),
@@ -353,9 +369,17 @@ impl App {
             ScreenId::Weekly => {
                 weekly::render(&self.weekly_state, frame, content_area);
             }
+            ScreenId::Plugin(ref name) => {
+                // Sidebar is hidden — plugin gets the full content area.
+                // Clone the name so we can call get_screen() without a conflicting borrow.
+                let name = name.clone();
+                if let Some(plugin) = self.plugin_registry.get_screen(&name) {
+                    plugin.render(frame, content_area);
+                }
+            }
         }
 
-        // 2. Plugin sidebar
+        // 2. Plugin sidebar (hidden when a screen plugin is active)
         if let Some(sidebar_area) = sidebar_area {
             let sidebar_focused = matches!(self.focus, Focus::Sidebar(_));
             let focused_idx = if let Focus::Sidebar(idx) = self.focus {
@@ -363,7 +387,8 @@ impl App {
             } else {
                 None
             };
-            self.plugins
+            self.plugin_registry
+                .sidebar
                 .render(sidebar_area, frame.buffer_mut(), sidebar_focused, focused_idx);
         }
 
@@ -416,12 +441,24 @@ impl App {
             ));
         }
 
+        // Collect plugin key hints when a screen plugin is active.
+        let plugin_hints: Option<Vec<(&'static str, &'static str)>> =
+            if let ScreenId::Plugin(ref name) = self.screen {
+                let name = name.clone();
+                self.plugin_registry
+                    .get_screen(&name)
+                    .map(|p| p.key_hints())
+            } else {
+                None
+            };
+
         keyhints::render(
             &self.screen,
             &self.focus,
             !self.modal_stack.is_empty(),
             is_kanban,
             &status_spans,
+            plugin_hints,
             frame,
             footer,
         );
@@ -442,31 +479,51 @@ impl App {
                     return Action::Back; // unfocus sidebar
                 }
                 _ => {
-                    self.plugins.handle_key(idx, key);
+                    self.plugin_registry.sidebar.handle_key(idx, key);
                     return Action::None;
                 }
             }
         }
 
         // 3. Screen
-        match &self.screen {
-            ScreenId::Dashboard => dashboard::handle_key(&mut self.dashboard, key),
-            ScreenId::ProjectView(_) => {
-                if let Some(project) = self.current_project() {
-                    project_view::handle_key(&mut self.project_view, key, &project)
+        // For Plugin screens, clone the name first to avoid conflicting borrows
+        // (self.screen borrows self, but we also need &mut self for get_screen_mut).
+        let screen = self.screen.clone();
+        match screen {
+            ScreenId::Plugin(name) => {
+                if let Some(plugin) = self.plugin_registry.get_screen_mut(&name) {
+                    match plugin.handle_key(key) {
+                        PluginAction::None => Action::None,
+                        PluginAction::Back => {
+                            self.handle_back();
+                            Action::None
+                        }
+                        PluginAction::Toast(msg) => Action::Toast(msg),
+                    }
                 } else {
                     Action::None
                 }
             }
-            ScreenId::Switch(_) => {
-                let projects = self.project_store.list_projects(None);
-                switch::handle_key(&mut self.switch_state, key, &projects)
-            }
-            ScreenId::Review => review::handle_key(&mut self.review_state, key),
-            ScreenId::Search => search::handle_key(&mut self.search_state, key),
-            ScreenId::People => people::handle_key(&mut self.people_state, key),
-            ScreenId::IssueBoard => issue_board::handle_key(&mut self.issue_board_state, key),
-            ScreenId::Weekly => weekly::handle_key(&mut self.weekly_state, key),
+            _ => match &self.screen {
+                ScreenId::Dashboard => dashboard::handle_key(&mut self.dashboard, key),
+                ScreenId::ProjectView(_) => {
+                    if let Some(project) = self.current_project() {
+                        project_view::handle_key(&mut self.project_view, key, &project)
+                    } else {
+                        Action::None
+                    }
+                }
+                ScreenId::Switch(_) => {
+                    let projects = self.project_store.list_projects(None);
+                    switch::handle_key(&mut self.switch_state, key, &projects)
+                }
+                ScreenId::Review => review::handle_key(&mut self.review_state, key),
+                ScreenId::Search => search::handle_key(&mut self.search_state, key),
+                ScreenId::People => people::handle_key(&mut self.people_state, key),
+                ScreenId::IssueBoard => issue_board::handle_key(&mut self.issue_board_state, key),
+                ScreenId::Weekly => weekly::handle_key(&mut self.weekly_state, key),
+                ScreenId::Plugin(_) => unreachable!(), // handled above
+            },
         }
     }
 
@@ -474,7 +531,7 @@ impl App {
         if let ScreenId::ProjectView(ref slug) = self.screen {
             self.project_store.get_project(slug)
         } else {
-            None
+            None // Plugin(_) and all other screens return None
         }
     }
 
@@ -489,6 +546,7 @@ impl App {
                 .projects
                 .get(self.dashboard.selected)
                 .map(|p| p.slug.clone()),
+            // All other screens (including Plugin) have no targeted project.
             _ => None,
         }
     }
@@ -564,6 +622,7 @@ impl App {
                 let screen_name = match self.screen {
                     ScreenId::Dashboard => "dashboard",
                     ScreenId::ProjectView(_) => "project_view",
+                    ScreenId::Plugin(_) => "plugin",
                     _ => "dashboard",
                 };
                 self.modal_stack
@@ -594,7 +653,7 @@ impl App {
 
             Action::ToggleSidebar => self.sidebar_visible = !self.sidebar_visible,
             Action::FocusSidebar => {
-                if self.sidebar_visible && self.plugins.plugin_count() > 0 {
+                if self.sidebar_visible && self.plugin_registry.sidebar.plugin_count() > 0 {
                     self.focus = Focus::Sidebar(0);
                 }
             }
@@ -761,8 +820,17 @@ impl App {
                 self.toast = Some(Toast::new(&msg));
             }
 
+            Action::OpenPlugin(name) => {
+                if let Some(plugin) = self.plugin_registry.get_screen_mut(&name) {
+                    plugin.on_enter();
+                    self.screen = ScreenId::Plugin(name);
+                } else {
+                    self.toast = Some(Toast::new(&format!("Plugin '{}' not found.", name)));
+                }
+            }
+
             Action::Tick => {
-                let notifications = self.plugins.on_tick();
+                let notifications = self.plugin_registry.tick_sidebar();
                 for msg in notifications {
                     self.toast = Some(Toast::new(&msg));
                 }
@@ -787,6 +855,9 @@ impl App {
             ScreenId::Search => {
                 // Enter on search results handled by search::handle_key returning PushScreen
             }
+            ScreenId::Plugin(_) => {
+                // Plugin screens handle their own Enter keys via handle_key() -> PluginAction.
+            }
             _ => {}
         }
     }
@@ -800,6 +871,14 @@ impl App {
         // When leaving the review screen, mark today as reviewed.
         if matches!(self.screen, ScreenId::Review) {
             let _ = self.last_review_store.mark_reviewed_today();
+        }
+        // For plugin screens, call on_leave() before navigating away.
+        // Clone the screen first to release the borrow on self before we need &mut self.
+        let current = self.screen.clone();
+        if let ScreenId::Plugin(name) = current {
+            if let Some(plugin) = self.plugin_registry.get_screen_mut(&name) {
+                plugin.on_leave();
+            }
         }
         self.screen = ScreenId::Dashboard;
         self.focus = Focus::Main;
@@ -816,6 +895,7 @@ impl App {
                 .get(self.dashboard.selected)
                 .map(|p| p.slug.clone()),
             ScreenId::ProjectView(slug) => Some(slug.clone()),
+            // Plugin screens and all other screens have no project to start work on.
             _ => None,
         };
 

@@ -228,6 +228,7 @@ fn handle_key_list(state: &mut DashboardState, key: KeyEvent) -> Action {
         KeyCode::Char('f') => Action::StopWork,
         KeyCode::Char('I') => Action::OpenIssueBoard,
         KeyCode::Char('W') => Action::OpenWeekly,
+        KeyCode::Char('J') => Action::OpenPlugin("about".to_string()),
         KeyCode::Char('?') => Action::Help,
         KeyCode::Char('q') => Action::Quit,
 
@@ -299,6 +300,7 @@ fn handle_key_kanban(state: &mut DashboardState, key: KeyEvent) -> Action {
         KeyCode::Char('i') => Action::AddIssue,
         KeyCode::Char('I') => Action::OpenIssueBoard,
         KeyCode::Char('W') => Action::OpenWeekly,
+        KeyCode::Char('J') => Action::OpenPlugin("about".to_string()),
         KeyCode::Char('?') => Action::Help,
         KeyCode::Char('q') => Action::Quit,
         KeyCode::Char('P') => Action::ToggleSidebar,
