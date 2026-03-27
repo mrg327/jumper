@@ -23,6 +23,9 @@ pub enum ScreenId {
     People,
     IssueBoard,
     Weekly,
+    /// A full-screen plugin identified by name (e.g., "about", "jira").
+    /// Navigation is flat — Back always returns to Dashboard.
+    Plugin(String),
 }
 
 /// Modal types that can be pushed onto the popup stack.
@@ -116,6 +119,10 @@ pub enum Action {
     // Open project file in $EDITOR
     OpenEditor,          // from ProjectView: open current project (o)
     OpenEditorSelected,  // from Dashboard: open cursor-selected project (O)
+
+    // Screen plugins
+    /// Open a full-screen plugin by name (e.g., "about", "jira").
+    OpenPlugin(String),
 
     // Command palette
     OpenCommandMode,     // ':' — open command input at the bottom
