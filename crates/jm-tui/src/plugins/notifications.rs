@@ -6,7 +6,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, List, ListItem, Paragraph};
 
 use crate::theme;
-use super::Plugin;
+use super::SidebarPlugin;
 
 // ── Data types ───────────────────────────────────────────────────────────────
 
@@ -65,7 +65,7 @@ impl NotificationsPlugin {
 
 // ── Plugin impl ──────────────────────────────────────────────────────────────
 
-impl Plugin for NotificationsPlugin {
+impl SidebarPlugin for NotificationsPlugin {
     fn name(&self) -> &str {
         "Notifications"
     }
