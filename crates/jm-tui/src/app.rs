@@ -369,7 +369,7 @@ impl App {
             ScreenId::Weekly => {
                 weekly::render(&self.weekly_state, frame, content_area);
             }
-            ScreenId::Plugin(ref name) => {
+            ScreenId::Plugin(name) => {
                 // Sidebar is hidden — plugin gets the full content area.
                 // Clone the name so we can call get_screen() without a conflicting borrow.
                 let name = name.clone();
@@ -443,7 +443,7 @@ impl App {
 
         // Collect plugin key hints when a screen plugin is active.
         let plugin_hints: Option<Vec<(&'static str, &'static str)>> =
-            if let ScreenId::Plugin(ref name) = self.screen {
+            if let ScreenId::Plugin(name) = &self.screen {
                 let name = name.clone();
                 self.plugin_registry
                     .get_screen(&name)
