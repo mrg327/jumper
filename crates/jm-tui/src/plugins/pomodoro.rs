@@ -7,7 +7,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::theme;
-use super::Plugin;
+use super::SidebarPlugin;
 
 // ── State machine ────────────────────────────────────────────────────────────
 
@@ -99,7 +99,7 @@ impl PomodoroPlugin {
 
 // ── Plugin impl ──────────────────────────────────────────────────────────────
 
-impl Plugin for PomodoroPlugin {
+impl SidebarPlugin for PomodoroPlugin {
     fn name(&self) -> &str {
         "Pomodoro"
     }

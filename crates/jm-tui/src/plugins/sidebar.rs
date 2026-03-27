@@ -1,59 +1,24 @@
 //! Plugin sidebar — stacks all plugins vertically and manages focus / ticks.
 
-use chrono::NaiveTime;
 use crossterm::event::KeyEvent;
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders};
 
-use jm_core::config::Config;
-
 use crate::theme;
-use super::{ClockPlugin, NotificationsPlugin, Plugin, PomodoroPlugin};
+use super::SidebarPlugin;
 
 // ── Sidebar ──────────────────────────────────────────────────────────────────
 
 pub struct PluginSidebar {
-    pub plugins: Vec<Box<dyn Plugin>>,
+    pub plugins: Vec<Box<dyn SidebarPlugin>>,
     #[allow(dead_code)]
     pub focused_idx: usize,
 }
 
 impl PluginSidebar {
-    /// Build the sidebar from `config.plugins.enabled`.
-    pub fn new(config: &Config) -> Self {
-        let pomo_cfg = &config.plugins.pomodoro;
-        let notif_cfg = &config.plugins.notifications;
-
-        // Parse scheduled reminders from config.
-        let reminders: Vec<(NaiveTime, String)> = notif_cfg
-            .reminders
-            .iter()
-            .filter_map(|r| {
-                NaiveTime::parse_from_str(&r.time, "%H:%M")
-                    .ok()
-                    .map(|t| (t, r.message.clone()))
-            })
-            .collect();
-
-        let mut plugins: Vec<Box<dyn Plugin>> = Vec::new();
-
-        for name in &config.plugins.enabled {
-            match name.as_str() {
-                "pomodoro" => plugins.push(Box::new(PomodoroPlugin::new(
-                    pomo_cfg.work_minutes,
-                    pomo_cfg.short_break_minutes,
-                    pomo_cfg.long_break_minutes,
-                    pomo_cfg.sessions_before_long,
-                ))),
-                "notifications" => {
-                    plugins.push(Box::new(NotificationsPlugin::new(reminders.clone())))
-                }
-                "clock" => plugins.push(Box::new(ClockPlugin::new())),
-                _ => {} // unknown plugin names are silently skipped
-            }
-        }
-
-        // Always have at least an empty sidebar to avoid panics.
+    /// Build the sidebar from a pre-constructed list of plugins.
+    /// The registry (or caller) is responsible for instantiating the plugins.
+    pub fn new_from(plugins: Vec<Box<dyn SidebarPlugin>>) -> Self {
         Self {
             plugins,
             focused_idx: 0,
@@ -171,10 +136,8 @@ impl PluginSidebar {
         for plugin in &mut self.plugins {
             // We rely on the plugin name to find the notification center.
             if plugin.name() == "Notifications" {
-                // Plugin trait is object-safe — we can't call NotificationsPlugin::push
-                // directly through the trait. We tunnel the message via a synthetic key
-                // event isn't ideal either. Instead, we expose a thin on_notify method
-                // in the trait with a default no-op, and NotificationsPlugin overrides it.
+                // SidebarPlugin trait is object-safe — we tunnel the message via on_notify,
+                // which NotificationsPlugin overrides to push into its queue.
                 plugin.on_notify(message);
                 break;
             }

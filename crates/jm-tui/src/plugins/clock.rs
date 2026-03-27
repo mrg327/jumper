@@ -6,7 +6,7 @@ use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Paragraph};
 
 use crate::theme;
-use super::Plugin;
+use super::SidebarPlugin;
 
 pub struct ClockPlugin;
 
@@ -16,7 +16,7 @@ impl ClockPlugin {
     }
 }
 
-impl Plugin for ClockPlugin {
+impl SidebarPlugin for ClockPlugin {
     fn name(&self) -> &str {
         "Clock"
     }
