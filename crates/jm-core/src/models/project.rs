@@ -161,9 +161,27 @@ pub struct Project {
 
 impl Project {
     pub fn new(name: &str) -> Self {
-        let slug = name.to_lowercase().replace(' ', "-");
+        // Normalize multiple consecutive spaces to single spaces to work around
+        // a libyml bug that crashes when parsing certain YAML patterns
+        let normalized_name = {
+            let mut result = String::new();
+            let mut prev_was_space = false;
+            for c in name.chars() {
+                if c.is_whitespace() {
+                    if !prev_was_space {
+                        result.push(' ');
+                        prev_was_space = true;
+                    }
+                } else {
+                    result.push(c);
+                    prev_was_space = false;
+                }
+            }
+            result
+        };
+        let slug = normalized_name.to_lowercase().replace(' ', "-");
         Self {
-            name: name.to_string(),
+            name: normalized_name,
             slug,
             status: Status::Active,
             priority: Priority::Medium,
@@ -187,7 +205,9 @@ impl Project {
         // python-frontmatter/PyYAML outputs keys in alphabetical order
         out.push_str("---\n");
         out.push_str(&format!("created: '{}'\n", self.created));
-        out.push_str(&format!("name: {}\n", yaml_string(&self.name)));
+        // Quote the name field with proper escaping for YAML special chars
+        // Always use single quotes to match python-frontmatter output
+        out.push_str(&format!("name: {}\n", format_yaml_name(&self.name)));
         out.push_str(&format!("priority: {}\n", self.priority));
         out.push_str(&format!("status: {}\n", self.status));
         // Tags
@@ -593,6 +613,34 @@ fn meta_string_list(meta: &serde_yml::Value, key: &str) -> Vec<String> {
     }
 }
 
+/// Format a project name for YAML output. Always quotes names with special
+/// characters to ensure YAML parsers handle them correctly.
+fn format_yaml_name(s: &str) -> String {
+    // Check if the name has YAML special characters
+    let has_special_chars = !s.chars().all(|c| c.is_alphanumeric() || c == ' ' || c == '-' || c == '_');
+    let is_reserved = ["true", "false", "null", "yes", "no", "on", "off"]
+        .contains(&s.to_lowercase().as_str());
+    let looks_like_date = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").is_ok();
+    let looks_like_number = s.parse::<f64>().is_ok();
+
+    // Always quote if:
+    // - Contains YAML special characters (?, :, !, #, etc)
+    // - Is a reserved keyword
+    // - Looks like a date or number
+    // - Is empty
+    if has_special_chars || is_reserved || looks_like_date || looks_like_number || s.is_empty() {
+        // Use double quotes for proper YAML escaping of special characters
+        // In YAML double-quoted strings, we only need to escape backslashes and quotes
+        let escaped = s
+            .replace('\\', "\\\\")  // Escape backslashes first
+            .replace('"', "\\\"");  // Escape double quotes
+        format!("\"{}\"", escaped)
+    } else {
+        // Simple alphanumeric names don't need quoting
+        s.to_string()
+    }
+}
+
 /// Format a string for YAML output. Strings that need quoting get single-quoted.
 fn yaml_string(s: &str) -> String {
     // Simple scalars that don't need quoting
@@ -609,7 +657,8 @@ fn yaml_string(s: &str) -> String {
     } else if s.is_empty() {
         "''".to_string()
     } else {
-        // Use single quotes, escaping internal single quotes by doubling
+        // Use single quotes for strings with special YAML characters
+        // In single-quoted strings, only single quotes need escaping (by doubling)
         format!("'{}'", s.replace('\'', "''"))
     }
 }

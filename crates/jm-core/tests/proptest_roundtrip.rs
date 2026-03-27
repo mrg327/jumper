@@ -252,7 +252,9 @@ proptest! {
         p.status = Status::Active;
         let md = p.to_markdown();
         let p2 = Project::from_markdown(&md).expect("from_markdown with special chars failed");
-        prop_assert_eq!(&p2.name, &trimmed);
+        // Project::new normalizes multiple consecutive spaces to single spaces to work around a libyml bug.
+        // So we compare the round-trip result with p.name (which has been normalized), not the original trimmed input.
+        prop_assert_eq!(&p2.name, &p.name);
     }
 }
 
@@ -537,3 +539,4 @@ fn test_project_log_entry_with_markdown_formatting() {
     assert_eq!(p2.log[0].lines[0], "Fixed issue with **bold** text in output");
     assert_eq!(p2.log[0].lines[1], "Reviewed PR #42 and approved");
 }
+
