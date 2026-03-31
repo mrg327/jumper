@@ -474,12 +474,15 @@ pub enum PluginAction {
     Back,
     /// Show a toast message
     Toast(String),
-    /// Request the app to open $EDITOR for multi-line input.
-    /// The context string identifies what to do with the result
-    /// (e.g., "add_comment:HMI-103", "transition_comment:HMI-103:31").
-    LaunchEditor { context: String, initial_content: String },
+    /// Request the app to launch $EDITOR with the given content.
+    /// After the editor closes, the plugin receives the edited content
+    /// via `on_editor_complete()`. The `context` string is passed through
+    /// so the plugin knows what the edit was for (e.g., "comment:HMI-103").
+    LaunchEditor { content: String, context: String },
 }
 ```
+
+See `plugin-architecture.md` for the full `PluginAction` definition and the App's conversion logic (editor lifecycle, temp file management, `on_editor_complete` callback). Note: field names are `content` and `context` — matching the canonical definition.
 
 The plugin never dispatches arbitrary `Action` variants. All internal state transitions (opening modals, navigating fields, etc.) are handled within the plugin's own state machine.
 
@@ -612,6 +615,27 @@ Transitions and editmeta are fetched **lazily** — only when the user opens the
 - Esc closes the modal and returns to the kanban board
 - When a refresh completes while the detail modal is open: if the viewed issue no longer exists, close the modal with a toast; if it still exists, update the data in place
 
+#### Field Pre-population for Edits
+
+**CRITICAL**: When opening a form modal for editing (e.g., from `e` on an editable field in the detail modal), the `Vec<(EditableField, Option<FieldValue>)>` **must be pre-populated** with the issue's CURRENT values. Do NOT open the form with `None` values.
+
+Extract values from the `JiraIssue` struct and convert to `FieldValue`:
+- `issue.summary` → `FieldValue::Text(summary.clone())`
+- `issue.priority` → `FieldValue::Select(priority_id)` — requires matching the priority name to an `AllowedValue.id` from the field's `allowed_values`. Look up by name case-insensitively.
+- `issue.story_points` → `FieldValue::Number(points)`
+- `issue.labels` → `FieldValue::Text(labels.join(", "))`
+- `issue.components` → `FieldValue::MultiSelect(component_ids)` — requires matching component names to their IDs from `AllowedValue` entries.
+
+**Why this matters**: JIRA's PUT `/rest/api/3/issue/{key}` only updates fields present in the body. However, if a field is included with an empty or null value, JIRA will overwrite the existing value with empty. Failing to pre-populate causes the user's edit to silently wipe other fields if the form is submitted with empty defaults.
+
+Pre-population flow:
+1. When `e` is pressed on field `i` in `IssueDetail`, look up the field's `EditableField` from the loaded `fields` list.
+2. Find the current value of that field from the `JiraIssue` struct (cached in the board's issue list by key lookup).
+3. Convert to `FieldValue` using the mapping above.
+4. Open the inline `DetailEditState` (for single-field inline editing) or the `CreateForm`-style form modal with the current value pre-filled.
+
+For single-field inline editing (`DetailEditState::EditingText` / `SelectOpen`), pre-populate the buffer/cursor from the issue's current value directly rather than going through the form modal.
+
 ### Detail Modal Rendering
 
 #### State
@@ -674,7 +698,7 @@ Vertical split inside the modal:
 #### Rendering Pseudocode
 
 ```rust
-fn render_detail_modal(&self, frame: &mut Frame, area: Rect, modal: &JiraModa) {
+fn render_detail_modal(&self, frame: &mut Frame, area: Rect, modal: &JiraModal) {
     let modal_area = centered_rect(70, area.height.saturating_sub(4), area);
 
     frame.render_widget(Clear, modal_area);
@@ -683,29 +707,47 @@ fn render_detail_modal(&self, frame: &mut Frame, area: Rect, modal: &JiraModa) {
     let inner = block.inner(modal_area);
     frame.render_widget(block, modal_area);
 
-    // Build a flat list of content rows, applying scroll_offset
+    // Build a single flat list of ALL renderable rows (fields + separator + comments).
+    // Then apply .skip(scroll_offset).take(visible_rows) to the whole list.
+    // This pattern is the same as help.rs uses for its scrollable content.
+    //
+    // IMPORTANT: do NOT apply skip() to field rows only and then render separator +
+    // comments unconditionally. That causes comments to overlap field rows when scrolled.
+    enum DetailRow<'a> {
+        Field { index: usize, row: &'a FieldRow },
+        Separator { comment_count: usize },
+        Comment(&'a JiraComment),
+    }
+
+    let mut all_rows: Vec<DetailRow> = Vec::new();
+    for (i, field_row) in all_field_rows.iter().enumerate() {
+        all_rows.push(DetailRow::Field { index: i, row: field_row });
+    }
+    all_rows.push(DetailRow::Separator { comment_count: comments.len() });
+    for comment in comments.iter() {
+        all_rows.push(DetailRow::Comment(comment));
+    }
+
     let visible_rows = inner.height as usize;
     let mut row_y = inner.y;
 
-    // Field rows
-    for (i, field_row) in all_field_rows.iter().enumerate().skip(scroll_offset) {
+    for detail_row in all_rows.iter().skip(scroll_offset).take(visible_rows) {
         if row_y >= inner.y + inner.height { break; }
-        let is_selected = focus == DetailFocus::Fields && i == field_cursor;
-        let style = if is_selected { theme::selected() } else { Style::default() };
-        render_field_row(frame, Rect { y: row_y, height: 1, ..inner }, field_row, is_selected);
+        match detail_row {
+            DetailRow::Field { index, row } => {
+                let is_selected = focus == DetailFocus::Fields && *index == field_cursor;
+                render_field_row(frame, Rect { y: row_y, height: 1, ..inner }, row, is_selected);
+            }
+            DetailRow::Separator { comment_count } => {
+                render_separator(frame, Rect { y: row_y, height: 1, ..inner }, *comment_count);
+            }
+            DetailRow::Comment(comment) => {
+                render_comment(frame, &mut row_y, inner, comment);
+                // render_comment increments row_y internally for multi-line comments;
+                // the outer row_y += 1 below accounts for the first line only.
+            }
+        }
         row_y += 1;
-    }
-
-    // Separator
-    if row_y < inner.y + inner.height {
-        render_separator(frame, Rect { y: row_y, height: 1, ..inner }, comment_count);
-        row_y += 1;
-    }
-
-    // Comments
-    for comment in comments.iter() {
-        if row_y >= inner.y + inner.height { break; }
-        render_comment(frame, &mut row_y, inner, comment);
     }
 }
 ```
@@ -725,19 +767,45 @@ This modal is managed internally by the plugin (not the App's modal system).
 │    Done           → Done           │
 │    Back to Todo   → To Do          │
 │                                    │
-│  Enter: apply  Esc: cancel         │
+│  Enter: apply  Esc: back           │
 └────────────────────────────────────┘
 ```
+
+**Esc in TransitionPicker/TransitionFields returns to IssueDetail, not the board.**
+
+When the user presses `s` in `IssueDetail` to open the transition picker, the plugin must save the current `IssueDetail` state and restore it on Esc. It must NOT return to the kanban board.
+
+Implementation — add a `previous_modal` field to `JiraPlugin`:
+
+```rust
+pub struct JiraPlugin {
+    modal: Option<JiraModal>,
+    previous_modal: Option<Box<JiraModal>>,  // saved state for modal stacking
+    // ...
+}
+```
+
+Lifecycle:
+1. **Opening `TransitionPicker`** (from `IssueDetail`): save the current `IssueDetail` state by moving `modal` into `previous_modal`, then set `modal` to `Some(JiraModal::TransitionPicker { ... })`.
+2. **Esc in `TransitionPicker`**: restore `modal = previous_modal.take().map(|b| *b)`. The user is back in `IssueDetail`.
+3. **Opening `TransitionFields`** (from `TransitionPicker`): similarly, save `TransitionPicker` into `previous_modal` and set `modal` to `Some(JiraModal::TransitionFields { ... })`.
+4. **Esc in `TransitionFields`**: restore `modal = previous_modal.take().map(|b| *b)`. The user is back in `TransitionPicker`.
+5. **Successful transition**: clear both `modal = None` and `previous_modal = None`. Return to the kanban board.
+
+The `previous_modal` stack is shallow (depth 1 is sufficient — the deepest chain is `IssueDetail → TransitionPicker → TransitionFields`). No recursive boxing needed.
 
 **Transition flow with required fields:**
 
 After the user selects a transition, check the `fields` object from the transitions API response. If the selected transition has required fields:
 
-1. Present a field input form (same form pattern as issue creation) for the required fields before executing the transition
-2. User fills required fields (e.g., Resolution for "Done" transition)
-3. POST the transition with the filled fields
+1. Save `TransitionPicker` state into `previous_modal`
+2. Open `JiraModal::TransitionFields` with the required fields
+3. User fills required fields (e.g., Resolution for "Done" transition)
+4. On `Enter`/submit: POST the transition with the filled fields
+5. On success: clear both `modal` and `previous_modal`, return to board
+6. On Esc: restore `previous_modal` (back to `TransitionPicker`)
 
-If no required fields, execute the transition immediately.
+If no required fields, execute the transition immediately (no `TransitionFields` modal needed).
 
 ### Comment-Type Transition Fields
 

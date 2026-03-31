@@ -1073,7 +1073,7 @@ HTTP status codes:
 
 **Rust deserialization**:
 ```rust
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 struct JiraErrorResponse {
     #[serde(rename = "errorMessages", default)]
     error_messages: Vec<String>,
@@ -1081,6 +1081,8 @@ struct JiraErrorResponse {
     errors: HashMap<String, String>,
 }
 ```
+
+`Default` is required because the error body is deserialized with `.unwrap_or_default()` in the HTTP error handler (see Authentication section). Without it, `unwrap_or_default()` will not compile.
 
 Combine into a display string: join `error_messages` + join `errors` values.
 

@@ -532,7 +532,7 @@ fn background_main(
     results: mpsc::Sender<ApiResult>,
 ) {
     // Single client for the lifetime of this thread
-    let client = ureq::agent();
+    let client = ureq::Agent::new();
 
     while !shutdown.load(Ordering::Relaxed) {
         match commands.recv_timeout(Duration::from_millis(100)) {

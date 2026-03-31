@@ -352,10 +352,17 @@ fn render_form(&self, frame: &mut Frame, area: Rect) {
     let inner = block.inner(form_area);
     frame.render_widget(block, form_area);
 
+    // Calculate label column width: max field name length + 2 (for ": " suffix).
+    // This aligns value areas across all fields regardless of name length.
+    let label_col_width = fields.iter()
+        .map(|(f, _)| f.name.len())
+        .max()
+        .unwrap_or(10) as u16 + 2;
+
     // Render each field row
     for (i, field) in fields.iter().enumerate() {
         let row_area = Rect { y: inner.y + i as u16, height: 1, ..inner };
-        self.render_field_row(frame, row_area, field, i == cursor, &state);
+        self.render_field_row(frame, row_area, field, i == cursor, &state, label_col_width);
     }
 
     // Position the terminal cursor when editing a text field
