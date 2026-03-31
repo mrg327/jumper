@@ -179,7 +179,7 @@ fn render_scroll_dots(
 
     let paragraph = Paragraph::new(dots)
         .alignment(Alignment::Center)
-        .style(Style::default().fg(theme::dim()));
+        .style(theme::dim());
     frame.render_widget(paragraph, area);
 }
 ```
@@ -211,7 +211,7 @@ Within a column of width W (minus 2 for borders = W-2 usable):
 ### Selected Card
 
 The selected card (at `selected_col`, `selected_row`) has:
-- Inverted/highlighted background (`theme::selection()`)
+- Inverted/highlighted background (`theme::selected()`)
 - Or a `>` marker on line 1: `>HMI-103  Story`
 
 ### Card Spacing

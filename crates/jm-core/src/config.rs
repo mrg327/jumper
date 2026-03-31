@@ -12,6 +12,10 @@ pub struct PluginConfig {
     pub notifications: NotificationsConfig,
     #[serde(default)]
     pub pomodoro: PomodoroConfig,
+    /// Catch-all for unknown plugin configs (e.g. `jira:`). Screen plugins
+    /// deserialize their own config from this map via `serde_yml::from_value`.
+    #[serde(flatten, default)]
+    pub extra: std::collections::HashMap<String, serde_yml::Value>,
 }
 
 impl Default for PluginConfig {
@@ -20,6 +24,7 @@ impl Default for PluginConfig {
             enabled: default_enabled_plugins(),
             notifications: NotificationsConfig::default(),
             pomodoro: PomodoroConfig::default(),
+            extra: std::collections::HashMap::new(),
         }
     }
 }

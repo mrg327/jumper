@@ -94,10 +94,10 @@ Each field row has a prefix character indicating its state:
 | Prefix | Color | Meaning |
 |--------|-------|---------|
 | `*` | Green (`theme::accent()`) | Required field, has a value |
-| `*` | Red (`theme::error()`) | Required field, empty (needs attention) |
+| `*` | Red (`theme::TEXT_ERROR`) | Required field, empty (needs attention) |
 | (space) | Normal | Optional field |
 | `~` | Dim (`theme::dim()`) | Unsupported field type (disabled) |
-| `!` | Red (`theme::error()`) | Validation error from API |
+| `!` | Red (`theme::TEXT_ERROR`) | Validation error from API |
 
 ### Field Row Layout
 
@@ -109,7 +109,7 @@ Each field row has a prefix character indicating its state:
 - `name`: field display name, right-padded to align colons
 - `value`: current value (or placeholder text in dim)
 - `suffix`: `[▼]` for select fields (dim when not focused)
-- Selected row: highlighted background (`theme::selection()`)
+- Selected row: highlighted background (`theme::selected()`)
 - Error text: shown after the value in red: `─ error message`
 
 ### Example Rendering
@@ -141,6 +141,19 @@ When `Enter` is pressed on a `Text` or `Number` field:
 For `Number` fields: validate on save. If not a valid number, show inline error and stay in edit mode.
 
 The text input area is bounded to the right side of the form (from the colon to the right border minus padding). The value is truncated with `...` if it exceeds the area when not editing.
+
+### Terminal Cursor Positioning
+
+When in `EditingText` state, the plugin must call:
+
+```rust
+frame.set_cursor_position(Position::new(
+    field_value_x + cursor_pos as u16,
+    field_row_y,
+))
+```
+
+after rendering the field row. This shows the blinking terminal cursor at the correct position within the text input. Without this call the cursor remains at (0, 0), which looks broken. `field_value_x` is the x-coordinate where the field's value area begins (after the label and colon), and `cursor_pos` is the byte offset of the edit cursor within the buffer.
 
 ## Inline Select Dropdown
 
@@ -276,6 +289,16 @@ fn render_form(&self, frame: &mut Frame, area: Rect) {
     for (i, field) in fields.iter().enumerate() {
         let row_area = Rect { y: inner.y + i as u16, height: 1, ..inner };
         self.render_field_row(frame, row_area, field, i == cursor, &state);
+    }
+
+    // Position the terminal cursor when editing a text field
+    if let FormState::EditingText { cursor: field_idx, cursor_pos, .. } = &self.form_state {
+        let row_y = inner.y + *field_idx as u16;
+        let field_value_x = inner.x + label_col_width; // x where value area starts
+        frame.set_cursor_position(Position::new(
+            field_value_x + *cursor_pos as u16,
+            row_y,
+        ));
     }
 
     // If SelectOpen, render dropdown overlay
