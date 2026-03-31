@@ -448,7 +448,7 @@ The plugin never dispatches arbitrary `Action` variants. All internal state tran
 - **Single `ureq::Agent`** per thread lifetime — reused for connection pooling
 - **Cooperative cancellation**: `AtomicBool` flag or `JiraCommand::Shutdown` to signal the thread to exit
 - **Channel draining**: The result-processing loop uses `while let Ok(result) = try_recv()` to drain all pending results per tick, not just one
-- **Thread spawn guard**: `on_enter()` checks `JoinHandle::is_finished()` before spawning a new background thread to avoid duplicates
+- **Thread spawn guard**: `on_enter()` checks `JoinHandle::is_finished()` before spawning a new background thread to avoid duplicates. In `on_enter()`, before spawning a new thread, check the shutdown state: (1) If `thread_handle.is_some()` and `shutdown_flag` is set to `true` (previous `on_leave()` requested shutdown): call `thread_handle.take().unwrap().join().ok()` to wait for the old thread to finish — this prevents a race where the old thread exits after the new one spawns, causing `Disconnected` on the new channels. (2) If `thread_handle.is_some()` and `is_finished()` is true: clean up the old handle. (3) Only then create fresh channels, a new `AtomicBool`, and spawn the new thread.
 - **Panic detection**: If `try_recv()` returns `TryRecvError::Disconnected`, the background thread has panicked. Show a reconnect prompt to the user.
 - **Generation counter**: Each `FetchMyIssues` command carries a monotonically increasing generation ID. Results with stale generation IDs are discarded to prevent out-of-order overwrites.
 
@@ -581,7 +581,7 @@ After the user selects a transition, check the `fields` object from the transiti
 
 If no required fields, execute the transition immediately.
 
-**Optimistic UI:** After sending the transition command, optimistically move the issue to the target column locally. If the API returns an error (`TransitionFailed`), revert the issue to its original column and show a blocking error modal.
+**Optimistic UI:** After sending the transition command, optimistically move the issue to the target column locally. If the API returns an error (`TransitionFailed`), revert the issue to its original column and show a blocking error modal. Set `refreshing = true` immediately when sending any write command (TransitionIssue, UpdateField, CreateIssue, AddComment) — not just when sending FetchMyIssues. This prevents the auto-refresh timer from firing during the write latency window and clobbering the optimistic state with stale server data.
 
 ### Issue Creation Flow
 
@@ -775,9 +775,9 @@ A toast is shown briefly: "JIRA refresh failed — showing cached data". The ind
 - **Initial load**: Fetch all assigned issues when JIRA screen is opened (`on_enter`). The background thread pages through ALL results from `/search` (incrementing `startAt`) and sends the full `Vec<JiraIssue>` once complete.
 - **Auto-refresh**: Every 60 seconds (configurable via `refresh_interval_secs`)
 - **Manual refresh**: Press `R` to force immediate refresh
-- **Post-write refresh**: After any write operation (transition, edit, create, comment), trigger a refresh with a **500ms delay** (JIRA has eventual consistency — immediate reads may return stale data)
+- **Post-write refresh**: After any write operation (transition, edit, create, comment), trigger a refresh with a **500ms delay** (JIRA has eventual consistency — immediate reads may return stale data). The 500ms delay between a write completion and the post-write refresh MUST be implemented as a TUI-side timer checked in `on_tick()` — e.g., `pending_refresh_at: Option<Instant>`. When `on_tick()` fires and `Instant::now() >= pending_refresh_at`, send the FetchMyIssues command. Do NOT use `thread::sleep()` in the background thread — it would block all other commands.
 - **Refresh deduplication**: A `refreshing: bool` flag prevents overlapping refreshes. Skip auto-refresh if a refresh is already in-flight.
-- **Generation counter**: Each `FetchMyIssues` command carries a `generation: u64`. Results are only applied if the generation matches the current expected generation, preventing stale overwrites from slow responses.
+- **Generation counter**: Each `FetchMyIssues` command carries a `generation: u64`. Results are only applied if the generation matches the current expected generation, preventing stale overwrites from slow responses. When a `JiraResult::Issues { generation, .. }` arrives with a stale generation (older than current), discard the data BUT still clear `refreshing = false`. Otherwise a stale result permanently blocks future auto-refreshes.
 - **Visual indicator**: Spinner in header during refresh ("↻ Refreshing...")
 - **Last sync**: Timestamp shown in footer ("Last sync: 14:25:03")
 - **Background**: Refresh happens in background thread; stale data remains visible until new data arrives
