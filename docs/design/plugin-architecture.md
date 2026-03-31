@@ -118,6 +118,11 @@ pub trait ScreenPlugin {
 
     /// The keybinding hint string shown in the footer bar.
     fn key_hints(&self) -> Vec<(&str, &str)> { Vec::new() }
+
+    /// Called after $EDITOR closes with the edited content.
+    /// `context` is the same string passed in PluginAction::LaunchEditor.
+    /// Default is a no-op — only override in plugins that use LaunchEditor.
+    fn on_editor_complete(&mut self, _content: String, _context: &str) {}
 }
 ```
 
@@ -133,6 +138,11 @@ pub enum PluginAction {
     Back,
     /// Show a toast notification
     Toast(String),
+    /// Request the app to launch $EDITOR with the given content.
+    /// After the editor closes, the plugin receives the edited content
+    /// via `on_editor_complete()`. The `context` string is passed through
+    /// so the plugin knows what the edit was for (e.g., "comment:HMI-103").
+    LaunchEditor { content: String, context: String },
 }
 ```
 
@@ -149,8 +159,67 @@ match plugin.handle_key(key) {
     PluginAction::Toast(msg) => {
         self.toast = Some(Toast::new(msg));
     }
+    PluginAction::LaunchEditor { content, context } => {
+        // Write content to a temp file, stash (plugin_name, context, path).
+        // The run loop picks this up before the next draw, suspends the TUI,
+        // launches $EDITOR, resumes, and calls plugin.on_editor_complete().
+        let temp_path = std::env::temp_dir()
+            .join(format!("jm-plugin-{}.txt", name));
+        std::fs::write(&temp_path, &content).ok();
+        self.pending_editor_plugin = Some((name.clone(), context, temp_path));
+    }
 }
 ```
+
+## Editor Integration
+
+Screen plugins can request the app to open `$EDITOR` by returning `PluginAction::LaunchEditor` from `handle_key()`. This allows plugins to compose multi-line text (e.g., JIRA comments, issue descriptions) using the user's preferred editor without any screen-plugin-level terminal management.
+
+### How It Works
+
+1. **Plugin returns `PluginAction::LaunchEditor { content, context }`** — `content` is the initial text pre-populated in the editor, `context` is an opaque string the plugin uses to identify what the edit is for (e.g., `"comment:HMI-103"`).
+2. **App writes content to a temp file** — `$TMPDIR/jm-plugin-<name>.txt`.
+3. **App stashes `(plugin_name, context, temp_path)`** in `pending_editor_plugin`.
+4. **At the top of the run loop** (before the next draw), the app detects the pending request, suspends the TUI (`disable_raw_mode`, `LeaveAlternateScreen`), and launches `$EDITOR` (falling back to `vim`).
+5. **After the editor exits**, the app resumes the TUI (`enable_raw_mode`, `EnterAlternateScreen`, `terminal.clear()`).
+6. **App reads back the temp file content**, deletes the file, and calls `plugin.on_editor_complete(edited_content, context)`.
+7. **Plugin processes the result** — e.g., converts to ADF and POSTs as a JIRA comment.
+
+### on_editor_complete Lifecycle Method
+
+```rust
+fn on_editor_complete(&mut self, content: String, context: &str) {
+    // context tells us what this edit is for
+    if let Some(issue_key) = context.strip_prefix("comment:") {
+        // Convert plain text to ADF and send as JIRA comment
+        self.send_comment(issue_key, content);
+    }
+}
+```
+
+The default implementation is a no-op. Plugins that do not use `LaunchEditor` do not need to implement `on_editor_complete`.
+
+### Screen Plugin Lifecycle with Editor
+
+The lifecycle step "5. Key events" can now result in an editor session:
+
+```
+handle_key() -> LaunchEditor { content, context }
+    │
+    ▼
+App writes temp file, sets pending_editor_plugin
+    │
+    ▼  (next run loop iteration, before draw)
+App suspends TUI → launches $EDITOR → resumes TUI
+    │
+    ▼
+plugin.on_editor_complete(edited_content, context)
+    │
+    ▼
+Plugin sends API request / updates state
+```
+
+The plugin's screen is **not** deactivated during the editor session. The user returns to the same plugin screen after the editor closes.
 
 ## Modal Strategy: Plugin-Owned Modals
 
@@ -218,7 +287,7 @@ Screen plugins are **self-contained** — they manage their own data and do not 
 
 ### Communication via PluginAction
 
-Screen plugins return `PluginAction` values from `handle_key()`. The app's event loop converts these into internal `Action` values for processing. The `PluginAction` enum is intentionally narrow — only `None`, `Back`, and `Toast(String)`.
+Screen plugins return `PluginAction` values from `handle_key()`. The app's event loop converts these into internal `Action` values for processing. The `PluginAction` enum is intentionally narrow — `None`, `Back`, `Toast(String)`, and `LaunchEditor { content, context }`.
 
 ## Plugin Registration & Configuration
 
@@ -512,7 +581,7 @@ After the rewrite, the plugin directory structure:
 ```
 crates/jm-tui/src/plugins/
 ├── mod.rs              # SidebarPlugin + ScreenPlugin traits (independent, no base trait)
-│                       #   + PluginAction enum { None, Back, Toast(String) }
+│                       #   + PluginAction enum { None, Back, Toast(String), LaunchEditor { content, context } }
 │                       #   + AnyPlugin enum wrapper (if needed for unified dispatch)
 ├── registry.rs         # PluginRegistry { sidebar: PluginSidebar, screens: Vec<Box<dyn ScreenPlugin>> }
 │                       #   + tick_active_screen() with notification forwarding
@@ -556,11 +625,13 @@ pub trait ScreenPlugin {
     fn on_tick(&mut self) -> Vec<String> { Vec::new() }   // 250ms tick rate, active only
     fn on_notify(&mut self, _message: &str) {}
     fn key_hints(&self) -> Vec<(&str, &str)> { Vec::new() }
+    fn on_editor_complete(&mut self, _content: String, _context: &str) {} // default no-op
 }
 
 pub enum PluginAction {
     None,
     Back,
     Toast(String),
+    LaunchEditor { content: String, context: String },
 }
 ```

@@ -78,6 +78,11 @@ pub struct App {
     // consumed and cleared at the top of the run loop before drawing.
     pub pending_editor_slug: Option<String>,
 
+    // Pending plugin editor request: set by PluginAction::LaunchEditor,
+    // consumed at the top of the run loop before drawing.
+    // Tuple: (plugin_name, context_string, temp_file_path)
+    pub pending_editor_plugin: Option<(String, String, std::path::PathBuf)>,
+
     // Morning review auto-trigger
     pub last_review_store: LastReviewStore,
 }
@@ -155,6 +160,7 @@ impl App {
             move_blocker_source_idx: 0,
             move_blocker_slug: String::new(),
             pending_editor_slug: None,
+            pending_editor_plugin: None,
 
             last_review_store,
         }
@@ -194,6 +200,34 @@ impl App {
                     dashboard::refresh(&mut self.dashboard, &self.project_store);
                 } else {
                     self.toast = Some(Toast::new("Project file not found."));
+                }
+            }
+
+            // Handle a pending plugin editor request before drawing.
+            // Follows the same terminal suspend/resume pattern as pending_editor_slug above.
+            if let Some((plugin_name, context, temp_path)) = self.pending_editor_plugin.take() {
+                let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vim".to_string());
+                // Restore terminal before handing off to editor.
+                let _ = crossterm::terminal::disable_raw_mode();
+                let _ = crossterm::execute!(
+                    std::io::stdout(),
+                    crossterm::terminal::LeaveAlternateScreen,
+                    crossterm::cursor::Show,
+                );
+                let _ = std::process::Command::new(&editor).arg(&temp_path).status();
+                // Reclaim terminal after editor exits.
+                let _ = crossterm::terminal::enable_raw_mode();
+                let _ = crossterm::execute!(
+                    std::io::stdout(),
+                    crossterm::terminal::EnterAlternateScreen,
+                    crossterm::cursor::Hide,
+                );
+                let _ = terminal.clear();
+                // Read back the edited content and notify the plugin.
+                let edited = std::fs::read_to_string(&temp_path).unwrap_or_default();
+                let _ = std::fs::remove_file(&temp_path);
+                if let Some(plugin) = self.plugin_registry.get_screen_mut(&plugin_name) {
+                    plugin.on_editor_complete(edited, &context);
                 }
             }
 
@@ -499,6 +533,13 @@ impl App {
                             Action::None
                         }
                         PluginAction::Toast(msg) => Action::Toast(msg),
+                        PluginAction::LaunchEditor { content, context } => {
+                            let temp_path = std::env::temp_dir()
+                                .join(format!("jm-plugin-{}.txt", name));
+                            std::fs::write(&temp_path, &content).ok();
+                            self.pending_editor_plugin = Some((name.clone(), context, temp_path));
+                            Action::None
+                        }
                     }
                 } else {
                     Action::None

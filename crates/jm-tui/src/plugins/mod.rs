@@ -70,6 +70,11 @@ pub enum PluginAction {
     Back,
     /// Show a toast notification with the given message.
     Toast(String),
+    /// Request the app to launch $EDITOR with the given content.
+    /// After the editor closes, the plugin receives the edited content
+    /// via `on_editor_complete()`. The `context` string is passed through
+    /// so the plugin knows what the edit was for (e.g., "comment:HMI-103").
+    LaunchEditor { content: String, context: String },
 }
 
 // ── ScreenPlugin ──────────────────────────────────────────────────────────────
@@ -111,4 +116,10 @@ pub trait ScreenPlugin {
     /// Keybinding hints shown in the footer bar when this screen is active.
     /// Returns `'static` str pairs to avoid lifetime entanglement with the plugin's borrow.
     fn key_hints(&self) -> Vec<(&'static str, &'static str)> { Vec::new() }
+
+    /// Called after $EDITOR closes with the edited content.
+    /// `context` is the same string that was passed in `PluginAction::LaunchEditor`.
+    /// The plugin should process the content (e.g., convert to ADF and send as a comment).
+    /// Default implementation is a no-op — only plugins that use `LaunchEditor` need to override this.
+    fn on_editor_complete(&mut self, _content: String, _context: &str) {}
 }
