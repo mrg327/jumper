@@ -368,12 +368,13 @@ enum JiraModal {
     TransitionFields {
         issue_key: String,
         transition: JiraTransition,
+        fields: Vec<(EditableField, Option<FieldValue>)>,  // explicit value storage
         form: FormState,
     },
     CreateForm {
         project_key: String,
         issue_type_id: String,
-        fields: Vec<EditableField>,
+        fields: Vec<(EditableField, Option<FieldValue>)>,  // was just Vec<EditableField>
         form: FormState,
     },
     ErrorModal {
@@ -551,6 +552,104 @@ Transitions and editmeta are fetched **lazily** — only when the user opens the
 - Navigate fields with `j/k`, press `e` to edit the selected field
 - Esc closes the modal and returns to the kanban board
 - When a refresh completes while the detail modal is open: if the viewed issue no longer exists, close the modal with a toast; if it still exists, update the data in place
+
+### Detail Modal Rendering
+
+#### State
+
+```rust
+// Inside JiraModal::IssueDetail
+issue_key: String,
+fields: Option<Vec<EditableField>>,     // from editmeta (lazy-loaded)
+transitions: Option<Vec<JiraTransition>>, // from transitions (lazy-loaded)
+comments: Option<Vec<JiraComment>>,     // from comments (lazy-loaded)
+field_cursor: usize,                    // which field row is selected
+scroll_offset: usize,                   // vertical scroll offset for the whole modal
+focus: DetailFocus,                     // which section has focus
+```
+
+```rust
+enum DetailFocus {
+    Fields,   // j/k moves field_cursor
+    Comments, // j/k scrolls comments
+}
+```
+
+#### Layout
+
+Vertical split inside the modal:
+
+- **Top section**: field rows (Status, Priority, Assignee, etc.)
+- **Separator line**: horizontal rule with "Comments (N)" label
+- **Bottom section**: comments (scrollable)
+
+#### Field Navigation
+
+- `j`/`k` in `DetailFocus::Fields`: moves `field_cursor` up/down through field rows
+- Selected field row: highlighted with `theme::selected()` background
+- Editable fields show `[e:edit]` hint on the selected row (right-aligned)
+- Read-only fields show value in dim with `(read-only)` hint
+- When `field_cursor` moves past the last field, focus shifts to `DetailFocus::Comments`
+
+#### Comments Section
+
+- `j`/`k` in `DetailFocus::Comments`: scrolls the comment viewport (one comment at a time)
+- When `k` at top of comments, focus returns to `DetailFocus::Fields` on the last field
+- Comments rendered as two lines per comment:
+
+```
+  author · relative_time
+    comment body text (wrapped to modal width)
+```
+
+- A blank line separates consecutive comments
+
+#### Scroll
+
+- If total content height (field rows + separator + comment lines) exceeds modal height, `scroll_offset` shifts the entire viewport up
+- `field_cursor` changes auto-adjust `scroll_offset` to keep the selected field row visible — same cursor-follows pattern used by the kanban board's `col_scroll_offsets`:
+  - If `field_cursor < scroll_offset` → `scroll_offset = field_cursor`
+  - If `field_cursor >= scroll_offset + visible_rows` → `scroll_offset = field_cursor - visible_rows + 1`
+- Comments in `DetailFocus::Comments` also adjust `scroll_offset` so the focused comment remains visible
+
+#### Rendering Pseudocode
+
+```rust
+fn render_detail_modal(&self, frame: &mut Frame, area: Rect, modal: &JiraModa) {
+    let modal_area = centered_rect(70, area.height.saturating_sub(4), area);
+
+    frame.render_widget(Clear, modal_area);
+    let block = Block::bordered()
+        .title(format!(" {}: {} ", issue_key, summary));
+    let inner = block.inner(modal_area);
+    frame.render_widget(block, modal_area);
+
+    // Build a flat list of content rows, applying scroll_offset
+    let visible_rows = inner.height as usize;
+    let mut row_y = inner.y;
+
+    // Field rows
+    for (i, field_row) in all_field_rows.iter().enumerate().skip(scroll_offset) {
+        if row_y >= inner.y + inner.height { break; }
+        let is_selected = focus == DetailFocus::Fields && i == field_cursor;
+        let style = if is_selected { theme::selected() } else { Style::default() };
+        render_field_row(frame, Rect { y: row_y, height: 1, ..inner }, field_row, is_selected);
+        row_y += 1;
+    }
+
+    // Separator
+    if row_y < inner.y + inner.height {
+        render_separator(frame, Rect { y: row_y, height: 1, ..inner }, comment_count);
+        row_y += 1;
+    }
+
+    // Comments
+    for comment in comments.iter() {
+        if row_y >= inner.y + inner.height { break; }
+        render_comment(frame, &mut row_y, inner, comment);
+    }
+}
+```
 
 ### Transition Picker Modal
 

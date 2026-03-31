@@ -206,7 +206,14 @@ Within a column of width W (minus 2 for borders = W-2 usable):
 
 - **Line 1**: Issue key in accent color. Issue type in dim, right-aligned.
 - **Line 2**: Summary, truncated to `col_width - 2` chars with `...` if longer.
-- **Line 3**: Priority name (colored: Highest/High=red, Medium=yellow, Low/Lowest=dim). Separator ` · `. Story points with "pts" suffix in dim. If no points, just priority. If no priority, just points. If neither, empty line.
+- **Line 3**: Priority name colored using existing theme constants. Separator ` · `. Story points with "pts" suffix in dim. If no points, just priority. If no priority, just points. If neither, empty line.
+
+Priority coloring uses existing theme constants:
+- "Highest", "High" → theme::PRIORITY_HIGH (red)
+- "Medium" → theme::PRIORITY_MEDIUM (yellow)
+- "Low", "Lowest" → theme::PRIORITY_LOW (dim)
+
+JIRA has 5 priority levels but theme.rs has 3 constants. Map Highest→HIGH and Lowest→LOW.
 
 ### Selected Card
 

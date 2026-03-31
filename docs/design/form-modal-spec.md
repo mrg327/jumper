@@ -325,7 +325,7 @@ fn render_form(&self, frame: &mut Frame, area: Rect) {
 ```
 User fills fields
        ↓
-FormState tracks all values: Vec<(EditableField, Option<String>)>
+JiraModal::CreateForm / TransitionFields stores Vec<(EditableField, Option<FieldValue>)>
        ↓
 On submit: build serde_json::Value from field values
        ↓
@@ -338,6 +338,34 @@ JiraResult::IssueCreated(key) or JiraResult::Error(e)
 On success: close form, toast, refresh board
 On error: parse errors, mark fields, stay on form
 ```
+
+### FieldValue
+
+```rust
+/// Represents a field value in the form. Used alongside EditableField
+/// in a parallel Vec: Vec<(EditableField, Option<FieldValue>)>
+/// This Vec lives in JiraModal::CreateForm or JiraModal::TransitionFields,
+/// NOT inside FormState (which only tracks UI cursor/edit state).
+pub enum FieldValue {
+    /// Text or TextArea field value
+    Text(String),
+    /// Number field value (story points, etc.)
+    Number(f64),
+    /// Single-select field value (stores the AllowedValue id)
+    Select(String),
+    /// Multi-select field values (stores AllowedValue ids)
+    MultiSelect(Vec<String>),
+    /// Date field value
+    Date(String),  // "YYYY-MM-DD" format
+}
+```
+
+When building the POST body, convert FieldValue to serde_json::Value:
+- `FieldValue::Text(s)` → `json!(s)` (bare string)
+- `FieldValue::Number(n)` → `json!(n)` (bare number)
+- `FieldValue::Select(id)` → `json!({ "id": id })` (object with id)
+- `FieldValue::MultiSelect(ids)` → `json!(ids.iter().map(|id| json!({ "id": id })).collect::<Vec<_>>())`
+- `FieldValue::Date(d)` → `json!(d)` (bare string)
 
 ### `centered_rect` Helper
 
