@@ -225,6 +225,45 @@ The selected card (at `selected_col`, `selected_row`) has:
 
 Cards are separated by 1 blank line within each column. This means each card occupies 4 rows (3 content + 1 separator). Maximum visible cards per column: `(column_height - 1) / 4` (minus 1 for the column header).
 
+### Column Vertical Scroll
+
+When a column has more issues than visible rows (i.e., `issue_count * 4 > column_height - 1`), the column scrolls vertically with cursor-follows behavior.
+
+#### State
+
+```rust
+struct BoardState {
+    // ... existing fields ...
+    col_scroll_offsets: Vec<usize>,  // per-column vertical scroll offset
+}
+```
+
+`col_scroll_offsets` is indexed by `selected_col` (full column index, not viewport-relative). Initialize all entries to `0`.
+
+#### Derived constants
+
+```rust
+// Minus 1 for column header row; divided by 4 for 3-line card + 1 separator line
+let max_visible_cards = (column_height - 1) / 4;
+```
+
+#### Behavior
+
+- `j`/`k` moves `selected_row` within the selected column as normal
+- After each `j`/`k`, adjust `col_scroll_offsets[selected_col]` to keep `selected_row` visible:
+  - If `selected_row < col_scroll_offsets[selected_col]`
+    → `col_scroll_offsets[selected_col] = selected_row`
+  - If `selected_row >= col_scroll_offsets[selected_col] + max_visible_cards`
+    → `col_scroll_offsets[selected_col] = selected_row - max_visible_cards + 1`
+- Render issues starting from `col_scroll_offsets[col]`, up to `max_visible_cards` issues per column
+- `g` sets `selected_row = 0` and `col_scroll_offsets[selected_col] = 0`
+- `G` sets `selected_row = last_issue_index` and
+  `col_scroll_offsets[selected_col] = last_issue_index.saturating_sub(max_visible_cards - 1)`
+
+#### Reset on column change
+
+When `h`/`l` moves to a different column, **preserve** that column's `selected_row` and `col_scroll_offsets[col]` from the last time it was visited. Do not reset them. This means the cursor returns to where the user left off in each column.
+
 ### Column Header
 
 ```

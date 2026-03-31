@@ -33,6 +33,13 @@ enum FormState {
     /// A select dropdown is open for the focused field.
     SelectOpen { field_cursor: usize, dropdown_cursor: usize },
 
+    /// A multi-select dropdown is open. Space toggles items, Enter confirms.
+    MultiSelectOpen {
+        field_cursor: usize,
+        dropdown_cursor: usize,
+        checked: HashSet<usize>,  // indices of selected items in allowed_values
+    },
+
     /// Form submitted, waiting for API response.
     Submitting,
 
@@ -52,12 +59,13 @@ enum FormState {
 ```
 Navigating
   │
-  ├── j/k          → Navigating (move cursor)
-  ├── Enter (text) → EditingText (activate inline edit)
-  ├── Enter (select) → SelectOpen (show dropdown)
+  ├── j/k               → Navigating (move cursor)
+  ├── Enter (text)      → EditingText (activate inline edit)
+  ├── Enter (select)    → SelectOpen (show dropdown)
+  ├── Enter (multiselect) → MultiSelectOpen { checked = currently-selected indices }
   ├── Enter (unsupported) → no-op (field is disabled)
-  ├── S            → Submitting (send create request)
-  ├── Esc          → close form, return PluginAction::Back
+  ├── S                 → Submitting (send create request)
+  ├── Esc               → close form, return PluginAction::Back
   │
 EditingText
   │
@@ -70,6 +78,13 @@ SelectOpen
   ├── j/k          → SelectOpen (move dropdown cursor)
   ├── Enter        → Navigating (select value, save, move to next field)
   ├── Esc          → Navigating (cancel, keep previous value)
+  │
+MultiSelectOpen
+  │
+  ├── j/k          → MultiSelectOpen (move dropdown cursor)
+  ├── Space        → MultiSelectOpen (toggle checked state of current item)
+  ├── Enter        → Navigating (confirm selections, save as comma-separated names)
+  ├── Esc          → Navigating (cancel, keep previous selections)
   │
 Submitting
   │
@@ -195,6 +210,40 @@ When `Enter` is pressed on a `Select` field:
 - Dropdown position: starts at the column of the value area, row below the field
 - If not enough room below, show above the field
 
+## Inline MultiSelect Dropdown
+
+When `Enter` is pressed on a `MultiSelect` field:
+
+1. The field value area changes to `[select multiple...]` as a placeholder
+2. A bordered checkbox list appears directly below the field row, overlaying fields below
+3. Navigation:
+   - `j`/`k` or `Up`/`Down` move `dropdown_cursor` within the list
+   - `Space` toggles the checkbox for the item at `dropdown_cursor` (adds/removes its index from `checked`)
+   - `Enter` confirms all checked items and closes the dropdown; saves as comma-separated `AllowedValue.name` strings for display, and the full `Vec<AllowedValue.id>` for the POST body
+   - `Esc` closes the dropdown without changing the current selections
+4. The dropdown is pre-populated from the current field value: any already-selected IDs set their corresponding indices in `checked`
+5. If the list exceeds the available vertical space, it scrolls internally
+
+### MultiSelect Dropdown Layout
+
+```
+  Component:  [select multiple...]
+              ┌─────────────────┐
+              │ [x] hmi-nav     │  ← checked (accent color)
+              │ [ ] hmi-core    │  ← unchecked
+              │ [x] platform    │  ← checked (accent color)
+              │ [ ] tools       │  ← unchecked
+              └─────────────────┘
+```
+
+- `[x]` rendered in `theme::accent()` (cyan) for checked items
+- `[ ]` rendered in normal color for unchecked items
+- The row at `dropdown_cursor` has `theme::selected()` background regardless of checked state
+- Dropdown width: max of (field value area width, longest option name + 6 for `[ ] ` prefix and padding)
+- Dropdown height: min of (option count, available rows below field, 8)
+- Dropdown position: same rules as `SelectOpen` (below field, flip above if insufficient room)
+- On `Enter`: collect all checked items' `AllowedValue.id` values for the POST body as `[{ "id": "..." }, ...]`
+
 ## Form Submission Flow
 
 1. User presses `S`
@@ -275,6 +324,16 @@ The same form widget is reused for transition fields (e.g., Resolution when tran
 | `Enter` | Select highlighted option, close dropdown |
 | `Esc` | Cancel, close dropdown |
 
+### MultiSelectOpen State
+
+| Key | Action |
+|-----|--------|
+| `j` / `Down` | Move dropdown cursor to next item |
+| `k` / `Up` | Move dropdown cursor to previous item |
+| `Space` | Toggle checked state of item at dropdown cursor |
+| `Enter` | Confirm all checked items, close dropdown |
+| `Esc` | Cancel, close dropdown (keep previous selections) |
+
 ## Implementation Notes
 
 ### Rendering
@@ -312,6 +371,11 @@ fn render_form(&self, frame: &mut Frame, area: Rect) {
     // If SelectOpen, render dropdown overlay
     if let FormState::SelectOpen { field_cursor, dropdown_cursor } = &self.form_state {
         self.render_dropdown(frame, inner, *field_cursor, *dropdown_cursor);
+    }
+
+    // If MultiSelectOpen, render checkbox dropdown overlay
+    if let FormState::MultiSelectOpen { field_cursor, dropdown_cursor, checked } = &self.form_state {
+        self.render_multiselect_dropdown(frame, inner, *field_cursor, *dropdown_cursor, checked);
     }
 
     // Render footer with keybindings (inside inner area, NOT on the border row)
