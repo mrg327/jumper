@@ -221,11 +221,28 @@ pub struct EpicInfo {
     pub name: String,
 }
 
+/// An allowed value for a select/multi-select field.
+/// Display `name` to user, send `{ "id": "..." }` in write bodies.
+pub struct AllowedValue {
+    pub id: String,
+    pub name: String,
+}
+
 pub struct JiraTransition {
     pub id: String,
     pub name: String,             // "Start Progress", "Done", etc.
     pub to_status: JiraStatus,
-    pub required_fields: Vec<EditableField>, // from transitions API `fields` object
+    pub required_fields: Vec<TransitionField>, // from transitions API `fields` object
+}
+
+/// A required field attached to a transition (e.g., Resolution for "Done").
+pub struct TransitionField {
+    pub field_id: String,
+    pub name: String,
+    pub field_type: FieldType,
+    pub allowed_values: Vec<AllowedValue>,
+    /// True when the transition requires a comment instead of (or in addition to) structured fields.
+    pub is_comment: bool,
 }
 
 pub struct JiraComment {
@@ -240,7 +257,8 @@ pub struct EditableField {
     pub name: String,             // "Summary", "Story Points"
     pub field_type: FieldType,
     pub required: bool,
-    pub allowed_values: Option<Vec<String>>, // For select fields
+    // Display `name` to user, send `{ "id": "..." }` in write bodies
+    pub allowed_values: Option<Vec<AllowedValue>>, // For select fields
 }
 
 // NOTE: "description" is excluded from editable fields. ADF round-tripping is lossy
@@ -265,6 +283,103 @@ pub struct JiraFieldDef {
     pub id: String,               // "customfield_10016"
     pub name: String,             // "Story Points"
     pub custom: bool,
+}
+
+/// Error returned from the JIRA REST API.
+/// Covers both top-level error_messages and per-field errors.
+pub struct JiraError {
+    pub status_code: u16,
+    pub error_messages: Vec<String>,
+    pub field_errors: HashMap<String, String>,
+}
+
+impl JiraError {
+    pub fn display(&self) -> String {
+        let mut parts = self.error_messages.clone();
+        for (field, msg) in &self.field_errors {
+            parts.push(format!("{}: {}", field, msg));
+        }
+        parts.join("\n")
+    }
+}
+
+/// Parsed result of the createmeta endpoint.
+/// `project`, `issuetype`, and `reporter` are already filtered out —
+/// only the remaining required + optional fields are included.
+pub struct CreateMetaResponse {
+    pub fields: Vec<EditableField>,  // required + optional fields for the project/issue-type
+}
+```
+
+### Plugin Struct
+
+The top-level struct that implements `ScreenPlugin`. All fields are private to `mod.rs`.
+
+```rust
+pub struct JiraPlugin {
+    // Config
+    config: JiraConfig,
+    account_id: Option<String>,   // from /myself, cached after first load
+
+    // Background thread communication
+    command_tx: Option<mpsc::Sender<JiraCommand>>,
+    result_rx: Option<mpsc::Receiver<JiraResult>>,
+    shutdown_flag: Option<Arc<AtomicBool>>,
+    thread_handle: Option<std::thread::JoinHandle<()>>,
+
+    // Data (from API, never persisted)
+    issues: Vec<JiraIssue>,
+    field_defs: Vec<JiraFieldDef>,  // from /field discovery
+    story_points_field: Option<String>,
+    sprint_field: Option<String>,
+
+    // Board state
+    board: BoardState,             // from horizontal-scroll-spec
+    project_filter: Option<String>,
+    show_done: bool,
+
+    // Modal state (plugin-owned modals)
+    modal: Option<JiraModal>,
+
+    // Loading/refresh state
+    loading: bool,
+    refreshing: bool,
+    generation: u64,               // for stale refresh detection
+    last_sync: Option<Instant>,
+
+    // Error state
+    last_error: Option<String>,
+}
+
+enum JiraModal {
+    IssueDetail {
+        issue_key: String,
+        fields: Option<Vec<EditableField>>,
+        transitions: Option<Vec<JiraTransition>>,
+        comments: Option<Vec<JiraComment>>,
+        scroll_offset: usize,
+        field_cursor: usize,
+    },
+    TransitionPicker {
+        issue_key: String,
+        transitions: Vec<JiraTransition>,
+        cursor: usize,
+    },
+    TransitionFields {
+        issue_key: String,
+        transition: JiraTransition,
+        form: FormState,
+    },
+    CreateForm {
+        project_key: String,
+        issue_type_id: String,
+        fields: Vec<EditableField>,
+        form: FormState,
+    },
+    ErrorModal {
+        title: String,
+        message: String,
+    },
 }
 ```
 
