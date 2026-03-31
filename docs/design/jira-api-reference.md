@@ -17,18 +17,57 @@ Accept: application/json
 ```
 
 **Rust (ureq v3 + base64 crate):**
+
+> **Dependencies** — add these to `Cargo.toml` for the plugin crate:
+> ```toml
+> ureq = "3"
+> base64 = "0.22"
+> serde = { version = "1", features = ["derive"] }
+> serde_json = "1.0"
+> ```
+> `serde_json` alone does **not** enable the `derive` feature for `serde`. You must list `serde` explicitly with `features = ["derive"]` or every `#[derive(Deserialize)]` annotation will fail to compile.
+>
+> **ureq v3 constructor**: use `ureq::Agent::new()` or `ureq::AgentBuilder::new().build()` (NOT `ureq::agent()` — that is the v2 API).
+
 ```rust
 use base64::Engine;
 
 let auth = base64::engine::general_purpose::STANDARD
     .encode(format!("{}:{}", email, api_token));
 
+// ureq v3: .call()? propagates network/IO errors only.
+// 4xx/5xx responses are returned as Ok(Response) with a non-2xx status —
+// they are NOT Err. Always check response.status() explicitly.
 let response = agent
     .get(&url)
     .header("Authorization", &format!("Basic {}", auth))
     .header("Content-Type", "application/json")
     .header("Accept", "application/json")
-    .call()?;
+    .call()?;  // ? only catches network errors
+
+match response.status() {
+    200..=299 => {
+        // Read the success body as JSON
+        let body: MyResponseType = response.into_body().read_json()?;
+        Ok(body)
+    }
+    429 => {
+        // Rate limited — honour Retry-After header (seconds to wait)
+        let retry_after = response
+            .headers()
+            .get("Retry-After")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(60);
+        Err(JiraError::RateLimited { retry_after_secs: retry_after })
+    }
+    status => {
+        // Read error body as JiraErrorResponse
+        let err: JiraErrorResponse = response.into_body().read_json()
+            .unwrap_or_default();
+        Err(JiraError::Api { status, detail: err })
+    }
+}
 ```
 
 The API token is generated at https://id.atlassian.com/manage-profile/security/api-tokens. It is NOT an OAuth token or PAT.
@@ -48,7 +87,9 @@ Response includes:
 { "startAt": 0, "maxResults": 100, "total": 247, ... }
 ```
 
-Fetch all pages: loop while `startAt + page_size < total`, incrementing `startAt` by `maxResults` each iteration.
+**Safe termination**: loop while `!page.is_empty() && page.len() >= max_results`, incrementing `startAt` by `max_results` each iteration. Stop when the page is empty or shorter than `max_results` (indicates the last page).
+
+**Do NOT use `total` for loop termination.** The `total` field is an estimate on large workloads — using it as a hard bound can silently drop the last page. It is still useful for progress indicators (e.g., "fetched N of ~total issues").
 
 ---
 
@@ -64,7 +105,7 @@ Fetch all pages: loop while `startAt + page_size < total`, incrementing `startAt
 | `priority` | `{ "id": "2", "name": "High" }` or `null` | `{ "id": "2" }` |
 | `issuetype` | `{ "id": "...", "name": "Story", "subtask": false }` | `{ "id": "10001" }` |
 | `assignee` | `{ "accountId": "...", "displayName": "..." }` or `null` | `{ "accountId": "..." }` |
-| `reporter` | `{ "accountId": "...", "displayName": "..." }` or `null` | N/A (auto-set) |
+| `reporter` | `{ "accountId": "...", "displayName": "..." }` or `null` | `{ "accountId": "..." }` (silently inject in create POST; required for business/service-desk project types) |
 | `labels` | `["frontend", "a11y"]` (string array) | `["frontend", "a11y"]` (full replacement) |
 | `components` | `[{ "id": "...", "name": "hmi-nav" }]` | `[{ "id": "10000" }]` |
 | `project` | `{ "id": "...", "key": "HMI", "name": "..." }` | `{ "key": "HMI" }` |
@@ -250,7 +291,7 @@ Query params:
 | `sprint` | `.fields.{sprint_field}` | Array of sprint objects. Find one with `"state": "active"`. Extract `.name`. If none active, try `"future"`, then most recent `"closed"`. `null` if field absent. |
 | `epic` | `.fields.parent` | Check if `.fields.parent.fields.issuetype.hierarchyLevel == 1` OR `.fields.parent.fields.issuetype.name == "Epic"`. If so, extract `EpicInfo { key: parent.key, name: parent.fields.summary }`. Otherwise `None`. |
 
-**Pagination**: Loop while `startAt + issues.len() < total`.
+**Pagination**: Loop while `!issues.is_empty() && issues.len() >= max_results`. See Pagination Pattern section above for rationale.
 
 **Custom field IDs**: `story_points_field` and `sprint_field` are dynamic. Either from config or from field discovery (endpoint 3). Include them in the `fields` query param.
 
@@ -827,6 +868,7 @@ POST /rest/api/3/issue
     "summary": "Fix crash when pressing Back",
     "priority": { "id": "2" },
     "assignee": { "accountId": "5b10a2844c20165700ede21g" },
+    "reporter": { "accountId": "5b10a2844c20165700ede21g" },
     "labels": ["frontend"],
     "components": [{ "id": "10000" }]
   }
@@ -836,6 +878,7 @@ POST /rest/api/3/issue
 - `project` uses `{ "key": "..." }`
 - `issuetype` uses `{ "id": "..." }` (NOT `{ "name": "Bug" }`)
 - `assignee` uses `{ "accountId": "..." }` from `/myself` response
+- **`reporter` must be silently injected** with the user's `accountId` from `/myself`. Some project types (business, service desk) require this field even though it is not shown to the user in the create form. Omitting it on those project types returns a 400 error. Always include it.
 - Select fields use `{ "id": "..." }`
 - Only include fields that the user actually filled in
 - Description is excluded (read-only in our plugin)
