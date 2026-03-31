@@ -111,6 +111,9 @@ enum JiraCommand {
     /// Fetch custom field definitions for discovery
     FetchFields,
 
+    /// Fetch available issue types for a project (creation flow step 2)
+    FetchIssueTypes { project_key: String },
+
     /// Cooperative shutdown signal
     Shutdown,
 }
@@ -133,7 +136,9 @@ enum JiraResult {
     IssueCreated(String),                       // new issue key
     EditMeta(String, Vec<EditableField>),       // issue_key, editable fields
     Fields(Vec<JiraFieldDef>),                  // custom field definitions
-    Error(JiraError),
+    /// Available issue types for a project
+    IssueTypes(String, Vec<JiraIssueType>),     // project_key, issue types
+    Error { context: String, error: JiraError }, // context e.g., "fetch_transitions:HMI-103"
 }
 ```
 
@@ -285,6 +290,13 @@ pub struct JiraFieldDef {
     pub custom: bool,
 }
 
+/// An issue type available for a project (from createmeta issuetypes endpoint)
+pub struct JiraIssueType {
+    pub id: String,
+    pub name: String,
+    pub subtask: bool,
+}
+
 /// Error returned from the JIRA REST API.
 /// Covers both top-level error_messages and per-field errors.
 pub struct JiraError {
@@ -349,6 +361,9 @@ pub struct JiraPlugin {
 
     // Error state
     last_error: Option<String>,
+
+    // Toast delivery: on_tick() pushes messages here; handle_key() drains them as PluginAction::Toast
+    pending_toasts: Vec<String>,
 }
 
 enum JiraModal {
@@ -359,6 +374,8 @@ enum JiraModal {
         comments: Option<Vec<JiraComment>>,
         scroll_offset: usize,
         field_cursor: usize,
+        /// Active inline edit state; None when no field is being edited
+        edit_state: Option<DetailEditState>,
     },
     TransitionPicker {
         issue_key: String,
@@ -371,6 +388,12 @@ enum JiraModal {
         fields: Vec<(EditableField, Option<FieldValue>)>,  // explicit value storage
         form: FormState,
     },
+    /// Step 1 of issue creation: select which project to create the issue in
+    SelectProject { projects: Vec<(String, String)>, cursor: usize },  // (key, name) pairs
+
+    /// Step 2 of issue creation: select issue type for the chosen project
+    SelectIssueType { project_key: String, issue_types: Vec<JiraIssueType>, cursor: usize },
+
     CreateForm {
         project_key: String,
         issue_type_id: String,
@@ -381,6 +404,18 @@ enum JiraModal {
         title: String,
         message: String,
     },
+}
+
+/// Inline edit state for the IssueDetail modal.
+/// When `e` is pressed on an editable field:
+/// - Text/Number fields → enter EditingText (inline buffer)
+/// - Select fields → enter SelectOpen (dropdown of AllowedValues)
+/// Enter saves and sends JiraCommand::UpdateField. Esc cancels without sending.
+enum DetailEditState {
+    /// Inline text editing (summary, story points)
+    EditingText { field_id: String, buffer: String, cursor_pos: usize },
+    /// Select dropdown open (priority, etc.)
+    SelectOpen { field_id: String, options: Vec<AllowedValue>, cursor: usize },
 }
 ```
 
@@ -439,14 +474,38 @@ pub enum PluginAction {
     Back,
     /// Show a toast message
     Toast(String),
+    /// Request the app to open $EDITOR for multi-line input.
+    /// The context string identifies what to do with the result
+    /// (e.g., "add_comment:HMI-103", "transition_comment:HMI-103:31").
+    LaunchEditor { context: String, initial_content: String },
 }
 ```
 
 The plugin never dispatches arbitrary `Action` variants. All internal state transitions (opening modals, navigating fields, etc.) are handled within the plugin's own state machine.
 
+### Toast Delivery Pattern
+
+`ScreenPlugin::on_tick()` returns `Vec<String>` for sidebar notifications — this path cannot return `PluginAction::Toast`. Background thread results (e.g., `JiraResult::IssueCreated(key)`) that should become toasts are bridged as follows:
+
+1. When `on_tick()` processes a result from the background thread that warrants a toast (success confirmation, error for auto-refresh), it pushes the message string to `self.pending_toasts`.
+2. On every `handle_key()` call, the plugin checks `pending_toasts`. If non-empty, it drains the first entry and returns `PluginAction::Toast(msg)`. This piggybacks toast delivery on the next keypress after the background result arrives.
+3. For notifications that should also appear in the sidebar (e.g., rate-limit warnings during auto-refresh), `on_tick()` returns them in its `Vec<String>` return value. The `PluginRegistry` forwards these to the sidebar notification system; the app additionally converts them to toasts if the JIRA screen is active.
+
+The `pending_toasts: Vec<String>` field on `JiraPlugin` (see struct definition above) is the queue for step 1–2.
+
 ### Background Thread Specifics
 
 - **Single `ureq::Agent`** per thread lifetime — reused for connection pooling
+- **accountId transport**: The background thread receives the `accountId` as a parameter in its spawning closure, not through the command channel. The `/myself` call is made **synchronously in `on_enter()`** (direct `ureq` call, NOT sent through the command channel) BEFORE the thread is spawned. This guarantees `accountId` is always available when the thread starts:
+
+  ```rust
+  let account_id = self.account_id.clone().expect("accountId set after /myself");
+  thread::spawn(move || {
+      // account_id is available in the closure for constructing JQL
+      api_thread_loop(command_rx, result_tx, agent, account_id, shutdown);
+  });
+  ```
+
 - **Cooperative cancellation**: `AtomicBool` flag or `JiraCommand::Shutdown` to signal the thread to exit
 - **Channel draining**: The result-processing loop uses `while let Ok(result) = try_recv()` to drain all pending results per tick, not just one
 - **Thread spawn guard**: `on_enter()` checks `JoinHandle::is_finished()` before spawning a new background thread to avoid duplicates. In `on_enter()`, before spawning a new thread, check the shutdown state: (1) If `thread_handle.is_some()` and `shutdown_flag` is set to `true` (previous `on_leave()` requested shutdown): call `thread_handle.take().unwrap().join().ok()` to wait for the old thread to finish — this prevents a race where the old thread exits after the new one spawns, causing `Disconnected` on the new channels. (2) If `thread_handle.is_some()` and `is_finished()` is true: clean up the old handle. (3) Only then create fresh channels, a new `AtomicBool`, and spawn the new thread.
@@ -680,11 +739,34 @@ After the user selects a transition, check the `fields` object from the transiti
 
 If no required fields, execute the transition immediately.
 
+### Comment-Type Transition Fields
+
+Some transitions (e.g., "Reject", "Request Changes") require a comment rather than a structured field. The `is_comment: bool` flag on `TransitionField` controls how the field is handled:
+
+**Detection:** A field is a comment field if its `field_id == "comment"`. When deserializing the transitions API response, set `is_comment = true` for any field with this ID.
+
+**POST body construction:** When building the transition POST body, check each required field's `is_comment` flag:
+- If `is_comment == false` (normal field): place in `"fields"`:
+  ```json
+  { "fields": { "<field_id>": { "id": "<value>" } } }
+  ```
+- If `is_comment == true` (comment field): place in `"update"`, NOT `"fields"`:
+  ```json
+  { "update": { "comment": [{ "add": { "body": <ADF> } }] } }
+  ```
+
+**User interaction:** When presenting required fields to the user before executing a transition, comment fields open `$EDITOR` (via `PluginAction::LaunchEditor` with context string `"transition_comment:<issue_key>:<transition_id>"`, e.g., `"transition_comment:HMI-103:31"`). Non-comment fields use the normal `TransitionFields` form.
+
 **Optimistic UI:** After sending the transition command, optimistically move the issue to the target column locally. If the API returns an error (`TransitionFailed`), revert the issue to its original column and show a blocking error modal. Set `refreshing = true` immediately when sending any write command (TransitionIssue, UpdateField, CreateIssue, AddComment) — not just when sending FetchMyIssues. This prevents the auto-refresh timer from firing during the write latency window and clobbering the optimistic state with stale server data.
 
 ### Issue Creation Flow
 
 This flow is managed internally by the plugin (not the App's modal system).
+
+**Modal state machine for creation:** Press `n` on the kanban board →
+1. Open `JiraModal::SelectProject` — project list derived from distinct `project_key` values in the loaded issues.
+2. User presses Enter → send `JiraCommand::FetchIssueTypes { project_key }` → open `JiraModal::SelectIssueType` when `JiraResult::IssueTypes` arrives.
+3. User presses Enter → send `JiraCommand::FetchCreateMeta { project_key, issue_type_id }` → open `JiraModal::CreateForm` when `JiraResult::CreateMeta` arrives.
 
 **Step 1: Select Project**
 ```
