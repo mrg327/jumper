@@ -110,11 +110,34 @@ Response includes:
 | `components` | `[{ "id": "...", "name": "hmi-nav" }]` | `[{ "id": "10000" }]` |
 | `project` | `{ "id": "...", "key": "HMI", "name": "..." }` | `{ "key": "HMI" }` |
 | `story_points` | `3.0` (bare number) or `null` | `5.0` (bare number) |
-| `sprint` | `[{ "id": 37, "name": "Sprint 24", "state": "active", ... }]` or `null` | N/A (not editable from this plugin) |
+| `sprint` | Array of sprint objects (classic projects) OR single sprint object (team-managed projects) or `null`. See sprint handling note below. | N/A (not editable from this plugin) |
 | `parent` (epic) | `{ "key": "NAV-1", "fields": { "summary": "...", "issuetype": {...} } }` or absent | N/A (not editable) |
 | `resolution` | `{ "id": "1", "name": "Done" }` or `null` | `{ "id": "1" }` |
 
 **Rule of thumb**: Simple values (string, number, string-array) are bare. Entity references (priority, assignee, component, resolution, project, issuetype) are always objects with `id`.
+
+**IMPORTANT**: The sprint custom field may be an array of sprint objects (classic projects) OR a single sprint object (team-managed projects). Deserialize as `serde_json::Value` and handle both cases:
+```rust
+fn extract_sprint_name(value: &serde_json::Value) -> Option<String> {
+    // Array case (classic projects)
+    if let Some(arr) = value.as_array() {
+        arr.iter()
+            .find(|s| s.get("state").and_then(|s| s.as_str()) == Some("active"))
+            .or_else(|| arr.iter().find(|s| s.get("state").and_then(|s| s.as_str()) == Some("future")))
+            .or_else(|| arr.last())
+            .and_then(|s| s.get("name").and_then(|n| n.as_str()).map(String::from))
+    }
+    // Single object case (team-managed projects)
+    else if value.is_object() {
+        value.get("name").and_then(|n| n.as_str()).map(String::from)
+    }
+    else {
+        None
+    }
+}
+```
+
+Sprint `id` is an integer (`i64`), not a string. If you define a sprint struct, use `id: i64` or deserialize as `serde_json::Value`.
 
 ---
 
@@ -288,7 +311,7 @@ Query params:
 | `project_key` | `.fields.project.key` | String from nested object |
 | `project_name` | `.fields.project.name` | String from nested object |
 | `story_points` | `.fields.{story_points_field}` | Bare `f64` or `null` (field ID is dynamic) |
-| `sprint` | `.fields.{sprint_field}` | Array of sprint objects. Find one with `"state": "active"`. Extract `.name`. If none active, try `"future"`, then most recent `"closed"`. `null` if field absent. |
+| `sprint` | `.fields.{sprint_field}` | May be array (classic projects) or single object (team-managed projects). Use `extract_sprint_name()` from the sprint handling note in the Common Field Value Formats section. `null` if field absent. |
 | `epic` | `.fields.parent` | Check if `.fields.parent.fields.issuetype.hierarchyLevel == 1` OR `.fields.parent.fields.issuetype.name == "Epic"`. If so, extract `EpicInfo { key: parent.key, name: parent.fields.summary }`. Otherwise `None`. |
 
 **Pagination**: Loop while `!issues.is_empty() && issues.len() >= max_results`. See Pagination Pattern section above for rationale.
@@ -930,6 +953,14 @@ Extract `.key` for the toast message: "Created HMI-116".
 
 ADF is a recursive JSON tree. Every node has a `type` field. Block nodes have a `content` array of child nodes. Text nodes have a `text` field.
 
+**CRITICAL**: Always use `node.get("attrs")` and `node.get("content")` — never index directly with `node["attrs"]` as this returns `Value::Null` on missing keys and will panic on `.as_str().unwrap()`. Use the null-safe pattern:
+```rust
+let level = node.get("attrs")
+    .and_then(|a| a.get("level"))
+    .and_then(|l| l.as_u64())
+    .unwrap_or(1);
+```
+
 ### Conversion Algorithm: `adf_to_text(node) -> String`
 
 ```
@@ -938,9 +969,19 @@ fn adf_to_text(node: &Value) -> String {
         "doc"         => join children with "\n\n"
         "paragraph"   => join children with ""  (inline concatenation)
         "heading"     => "#".repeat(level) + " " + join children
-        "bulletList"  => join children with "\n"  (each child is a listItem)
-        "orderedList" => join children with "\n"  (number each)
-        "listItem"    => "- " + join children     (or "N. " for ordered)
+        "bulletList"  => children.iter()
+                            .map(|item| format!("- {}", adf_to_text(item)))
+                            .collect::<Vec<_>>().join("\n")
+        "orderedList" => {
+            // Must track item index across children
+            children.iter().enumerate().map(|(i, item)| {
+                format!("{}. {}", i + 1, adf_to_text(item))
+            }).collect::<Vec<_>>().join("\n")
+        }
+        "listItem"    => join children with ""
+        // NOTE: For bulletList children, the bulletList parent prefixes "- ".
+        // For orderedList children, the parent handles numbering.
+        // listItem just returns its content without a prefix in both cases.
         "codeBlock"   => "    " + indent each line of text content
         "blockquote"  => "> " + prefix each line
         "text"        => node["text"]  (leaf node)
