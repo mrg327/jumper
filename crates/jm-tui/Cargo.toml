@@ -16,5 +16,11 @@ crossterm = "0.28"
 ratatui = "0.29"
 regex = "1"
 
+# JIRA plugin dependencies (Phase 1)
+ureq = { version = "3", features = ["json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+
 [dev-dependencies]
 tempfile = "3"

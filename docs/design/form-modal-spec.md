@@ -36,6 +36,12 @@ enum FormState {
     /// Form submitted, waiting for API response.
     Submitting,
 
+    // NOTE: FormState tracks UI state only (cursor, edit buffer, dropdown).
+    // Actual field values are stored in a parallel Vec alongside the FormState:
+    //   values: Vec<(EditableField, Option<FieldValue>)>
+    // This Vec lives in the JiraModal variant (CreateForm or TransitionFields),
+    // NOT inside FormState. FormState.cursor indexes into this Vec.
+
     /// API returned validation errors. Fields marked with errors.
     ValidationError { cursor: usize, errors: HashMap<String, String> },
 }
@@ -84,7 +90,9 @@ ValidationError
 | `Text` | Value or `[empty]` | Inline text input, cursor visible | `"string"` |
 | `Number` | Value or `[empty]` | Inline text input with number validation | `number` |
 | `Select` | Selected value name + `[▼]` | Inline dropdown below field | `{ "id": "..." }` |
-| `MultiSelect` | Comma-separated names | Inline dropdown with toggle | `[{ "id": "..." }, ...]` |
+| `MultiSelect` | Comma-separated names | Inline dropdown with checkboxes (Space to toggle, Enter to confirm) | `[{ "id": "..." }, ...]` |
+| `TextArea` | First line + `...` | Opens `$EDITOR` via `PluginAction::LaunchEditor`. Result returned via `on_editor_complete()`. | ADF JSON (via `text_to_adf()`) |
+| `Date` | `YYYY-MM-DD` or `[empty]` | Inline text input with date validation (`YYYY-MM-DD` format) | `"YYYY-MM-DD"` |
 | `Unsupported` | `(unsupported type)` in dim | Not editable (Enter is no-op) | Omitted from POST |
 
 ## Field Indicators (Color-Coded Prefixes)
@@ -228,8 +236,8 @@ The same form widget is reused for transition fields (e.g., Resolution when tran
 ## Sizing and Positioning
 
 - **Width**: min(terminal_width - 4, 60). Centered horizontally.
-- **Height**: field_count + 4 (title + padding + footer). Max: terminal_height - 4. If more fields than fit, the field list scrolls internally.
-- **Position**: Centered on screen using `centered_rect()` pattern from existing modals.
+- **Height**: field_count + 6 (2 border rows + 1 blank top padding + field rows + 1 blank bottom padding + 1 footer). Max: terminal_height - 4. If more fields than fit, the field list scrolls internally.
+- **Position**: Centered on screen using a **new** pixel-absolute `centered_rect(width, height, area)` helper. Do NOT use `crate::modals::centered_rect()` which takes percentages.
 - **Background**: Clear the area behind the modal (render `Clear` widget first, then border, then content).
 
 ## Keybindings Summary
@@ -275,7 +283,7 @@ The form is rendered inside the plugin's `render()` method as an overlay:
 
 ```rust
 fn render_form(&self, frame: &mut Frame, area: Rect) {
-    let form_area = centered_rect(60, field_count + 4, area);
+    let form_area = centered_rect(60, field_count + 6, area);
 
     // Clear background
     frame.render_widget(Clear, form_area);
@@ -306,8 +314,8 @@ fn render_form(&self, frame: &mut Frame, area: Rect) {
         self.render_dropdown(frame, inner, *field_cursor, *dropdown_cursor);
     }
 
-    // Render footer with keybindings
-    let footer_area = Rect { y: form_area.y + form_area.height - 1, height: 1, ..form_area };
+    // Render footer with keybindings (inside inner area, NOT on the border row)
+    let footer_area = Rect { y: inner.y + inner.height - 1, height: 1, ..inner };
     // ...
 }
 ```
