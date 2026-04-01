@@ -29,11 +29,16 @@ struct BoardState {
     /// Index of the selected column (0-based, in the full column set)
     selected_col: usize,
 
-    /// Index of the first visible column (scroll offset)
+    /// Index of the first visible column (horizontal scroll offset)
     scroll_offset: usize,
 
     /// Row cursor within the selected column
     selected_row: usize,
+
+    /// Per-column vertical scroll offsets. Indexed by full column index (not viewport-relative).
+    /// Initialize all entries to 0. Resize (via .resize(new_len, 0)) whenever columns change
+    /// after a refresh. Access defensively: col_scroll_offsets.get(col).copied().unwrap_or(0).
+    col_scroll_offsets: Vec<usize>,
 }
 ```
 
@@ -211,40 +216,33 @@ Within a column of width W (minus 2 for borders = W-2 usable):
 Priority coloring uses existing theme constants:
 - "Highest", "High" → theme::PRIORITY_HIGH (red)
 - "Medium" → theme::PRIORITY_MEDIUM (yellow)
-- "Low", "Lowest" → theme::PRIORITY_LOW (dim)
+- "Low", "Lowest" → theme::PRIORITY_LOW (blue — `Color::Blue` in theme.rs)
 
 JIRA has 5 priority levels but theme.rs has 3 constants. Map Highest→HIGH and Lowest→LOW.
 
 ### Selected Card
 
 The selected card (at `selected_col`, `selected_row`) has:
-- Inverted/highlighted background (`theme::selected()`)
-- Or a `>` marker on line 1: `>HMI-103  Story`
+- Inverted/highlighted background (`theme::selected()`) — this is the **only** selection indicator. Do NOT add a `>` marker prefix; use background highlight only for consistency with the rest of the TUI.
 
 ### Card Spacing
 
-Cards are separated by 1 blank line within each column. This means each card occupies 4 rows (3 content + 1 separator). Maximum visible cards per column: `(column_height - 1) / 4` (minus 1 for the column header).
+Cards are separated by 1 blank line within each column. This means each card occupies 4 rows (3 content + 1 separator). Maximum visible cards per column: `column_height.saturating_sub(1) / 4` (minus 1 for the column header; `saturating_sub` prevents u16 underflow when `column_height` is 0 on tiny terminals).
 
 ### Column Vertical Scroll
 
-When a column has more issues than visible rows (i.e., `issue_count * 4 > column_height - 1`), the column scrolls vertically with cursor-follows behavior.
+When a column has more issues than visible rows (i.e., `issue_count * 4 > column_height.saturating_sub(1)`), the column scrolls vertically with cursor-follows behavior.
 
 #### State
 
-```rust
-struct BoardState {
-    // ... existing fields ...
-    col_scroll_offsets: Vec<usize>,  // per-column vertical scroll offset
-}
-```
-
-`col_scroll_offsets` is indexed by `selected_col` (full column index, not viewport-relative). Initialize all entries to `0`.
+`col_scroll_offsets: Vec<usize>` is part of `BoardState` (see the full struct definition in the Core Concepts section above). It is indexed by `selected_col` (full column index, not viewport-relative). Initialize all entries to `0`.
 
 #### Derived constants
 
 ```rust
-// Minus 1 for column header row; divided by 4 for 3-line card + 1 separator line
-let max_visible_cards = (column_height - 1) / 4;
+// Minus 1 for column header row; divided by 4 for 3-line card + 1 separator line.
+// saturating_sub prevents u16 underflow when column_height is 0 (very small terminal).
+let max_visible_cards = column_height.saturating_sub(1) / 4;
 ```
 
 #### Behavior
@@ -283,6 +281,7 @@ When a refresh completes with new data:
 5. If the status no longer exists, clamp `selected_col` to `columns.len() - 1`.
 6. If the issue no longer exists in the column, clamp `selected_row` to the column's issue count.
 7. Recalculate `scroll_offset` to ensure `selected_col` is visible.
+8. **Resize `col_scroll_offsets`** to match the new column count: append `0` for new columns, truncate for removed columns. Use `col_scroll_offsets.resize(new_column_count, 0)`. Do this before step 3 so the index into `col_scroll_offsets` is always valid. When rendering, always access as `col_scroll_offsets.get(col).copied().unwrap_or(0)` as a defensive fallback.
 
 ## No-Scroll Case
 
@@ -313,7 +312,7 @@ When `total_columns <= visible_count_at_min_width`:
 │                        ● ● ● ● ● ○ ○ ○                           │
 ├───────────────────────────────────────────────────────────────────┤
 │ hjkl:nav  s:transition  c:comment  Enter:detail  p:proj  R:refresh│
-│ n:new  D:toggle-done  J:back           Last sync: 14:25:03       │
+│ n:new  D:toggle-done  Esc:back         Last sync: 14:25:03       │
 └───────────────────────────────────────────────────────────────────┘
 ```
 

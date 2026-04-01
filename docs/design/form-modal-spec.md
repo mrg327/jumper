@@ -25,7 +25,10 @@ The form modal is a centered overlay that displays all fields at once in a verti
 ```rust
 enum FormState {
     /// Navigating between fields. j/k moves cursor, Enter enters edit mode.
-    Navigating { cursor: usize },
+    /// `scroll_offset` is the index of the first visible field row in the form.
+    /// Needed when the field count exceeds the modal's visible height.
+    /// Cursor-follows algorithm: same pattern as column vertical scroll in horizontal-scroll-spec.
+    Navigating { cursor: usize, scroll_offset: usize },
 
     /// Editing a text or number field inline. Typing modifies the value.
     EditingText { cursor: usize, buffer: String, cursor_pos: usize },
@@ -50,16 +53,19 @@ enum FormState {
     // NOT inside FormState. FormState.cursor indexes into this Vec.
 
     /// API returned validation errors. Fields marked with errors.
-    ValidationError { cursor: usize, errors: HashMap<String, String> },
+    /// `scroll_offset` must be preserved from the Navigating state to keep the view consistent.
+    ValidationError { cursor: usize, scroll_offset: usize, errors: HashMap<String, String> },
 }
 ```
 
 ### State Transitions
 
 ```
-Navigating
+Navigating { cursor, scroll_offset }
   │
-  ├── j/k               → Navigating (move cursor)
+  ├── j/k               → Navigating (move cursor, adjust scroll_offset for cursor-follows)
+  ├── g                 → Navigating { cursor: 0, scroll_offset: 0 }
+  ├── G                 → Navigating { cursor: last, scroll_offset: max(0, last - visible_rows + 1) }
   ├── Enter (text)      → EditingText (activate inline edit)
   ├── Enter (select)    → SelectOpen (show dropdown)
   ├── Enter (multiselect) → MultiSelectOpen { checked = currently-selected indices }
@@ -70,28 +76,28 @@ Navigating
 EditingText
   │
   ├── typing       → EditingText (update buffer)
-  ├── Enter        → Navigating (save value, move to next field)
-  ├── Esc          → Navigating (discard changes, stay on field)
+  ├── Enter        → Navigating (save value, move to next field; preserve scroll_offset)
+  ├── Esc          → Navigating (discard changes, stay on field; preserve scroll_offset)
   │
 SelectOpen
   │
   ├── j/k          → SelectOpen (move dropdown cursor)
-  ├── Enter        → Navigating (select value, save, move to next field)
-  ├── Esc          → Navigating (cancel, keep previous value)
+  ├── Enter        → Navigating (select value, save, move to next field; preserve scroll_offset)
+  ├── Esc          → Navigating (cancel, keep previous value; preserve scroll_offset)
   │
 MultiSelectOpen
   │
   ├── j/k          → MultiSelectOpen (move dropdown cursor)
   ├── Space        → MultiSelectOpen (toggle checked state of current item)
-  ├── Enter        → Navigating (confirm selections, save as comma-separated names)
-  ├── Esc          → Navigating (cancel, keep previous selections)
+  ├── Enter        → Navigating (confirm selections, save as comma-separated names; preserve scroll_offset)
+  ├── Esc          → Navigating (cancel, keep previous selections; preserve scroll_offset)
   │
 Submitting
   │
   ├── API success  → close form, toast "Created HMI-116"
-  ├── API error    → ValidationError (mark fields, jump to first error)
+  ├── API error    → ValidationError (mark fields, jump to first error; preserve scroll_offset)
   │
-ValidationError
+ValidationError { cursor, scroll_offset, errors }
   │
   ├── (same as Navigating, but error markers shown)
   ├── S            → Submitting (retry)
@@ -295,13 +301,13 @@ The same form widget is reused for transition fields (e.g., Resolution when tran
 
 | Key | Action |
 |-----|--------|
-| `j` / `Down` | Move cursor to next field |
-| `k` / `Up` | Move cursor to previous field |
+| `j` / `Down` | Move cursor to next field (adjust `scroll_offset` for cursor-follows) |
+| `k` / `Up` | Move cursor to previous field (adjust `scroll_offset` for cursor-follows) |
 | `Enter` | Enter edit mode for focused field |
 | `S` | Submit form (pre-validate first) |
 | `Esc` | Cancel and close form |
-| `g` | Jump to first field |
-| `G` | Jump to last field |
+| `g` | Jump to first field (`cursor = 0`, `scroll_offset = 0`) |
+| `G` | Jump to last field (`cursor = last`, `scroll_offset` adjusted) |
 
 ### EditingText State
 
@@ -359,15 +365,28 @@ fn render_form(&self, frame: &mut Frame, area: Rect) {
         .max()
         .unwrap_or(10) as u16 + 2;
 
-    // Render each field row
-    for (i, field) in fields.iter().enumerate() {
-        let row_area = Rect { y: inner.y + i as u16, height: 1, ..inner };
-        self.render_field_row(frame, row_area, field, i == cursor, &state, label_col_width);
+    // Determine scroll_offset from the current FormState.
+    // The cursor-follows invariant must be maintained by the key handler:
+    //   If cursor < scroll_offset: scroll_offset = cursor
+    //   If cursor >= scroll_offset + visible_rows: scroll_offset = cursor - visible_rows + 1
+    let (cursor, scroll_offset) = match &self.form_state {
+        FormState::Navigating { cursor, scroll_offset } => (*cursor, *scroll_offset),
+        FormState::ValidationError { cursor, scroll_offset, .. } => (*cursor, *scroll_offset),
+        FormState::EditingText { cursor, .. } => (*cursor, 0),  // dropdown open: no scroll
+        _ => (0, 0),
+    };
+    let visible_rows = (inner.height as usize).saturating_sub(1); // minus footer row
+
+    // Render only visible field rows (skip based on scroll_offset)
+    for (i, field) in fields.iter().enumerate().skip(scroll_offset).take(visible_rows) {
+        let row_area = Rect { y: inner.y + (i - scroll_offset) as u16, height: 1, ..inner };
+        self.render_field_row(frame, row_area, field, i == cursor, &self.form_state, label_col_width);
     }
 
     // Position the terminal cursor when editing a text field
     if let FormState::EditingText { cursor: field_idx, cursor_pos, .. } = &self.form_state {
-        let row_y = inner.y + *field_idx as u16;
+        let visible_row = field_idx.saturating_sub(scroll_offset);
+        let row_y = inner.y + visible_row as u16;
         let field_value_x = inner.x + label_col_width; // x where value area starts
         frame.set_cursor_position(Position::new(
             field_value_x + *cursor_pos as u16,

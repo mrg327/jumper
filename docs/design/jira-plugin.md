@@ -270,6 +270,11 @@ pub struct EditableField {
 // (rich formatting → plain text → simple ADF paragraph), so description is read-only.
 // Only simple fields (summary, priority, etc.) are editable via editmeta.
 
+/// `Clone` is required because `FieldType` is stored inside `EditableField`,
+/// which lives in `JiraModal` variants (which are cloned when pushed to `previous_modal`).
+/// `PartialEq` is required for match-guards and rendering comparisons.
+/// `Debug` is required for `#[derive(Debug)]` on structs that contain `FieldType`.
+#[derive(Debug, Clone, PartialEq)]
 pub enum FieldType {
     Text,
     TextArea,
@@ -352,6 +357,10 @@ pub struct JiraPlugin {
 
     // Modal state (plugin-owned modals)
     modal: Option<JiraModal>,
+    /// Saved previous modal for shallow stack navigation (depth 1).
+    /// When the user opens TransitionPicker from IssueDetail, the IssueDetail
+    /// state is moved here so Esc can restore it. Cleared on successful transition.
+    previous_modal: Option<Box<JiraModal>>,
 
     // Loading/refresh state
     loading: bool,
@@ -374,6 +383,9 @@ enum JiraModal {
         comments: Option<Vec<JiraComment>>,
         scroll_offset: usize,
         field_cursor: usize,
+        /// Which section (Fields or Comments) has keyboard focus.
+        /// Used by j/k navigation and rendering to highlight the correct section.
+        focus: DetailFocus,
         /// Active inline edit state; None when no field is being edited
         edit_state: Option<DetailEditState>,
     },
@@ -433,13 +445,18 @@ JIRA Cloud v3 uses Atlassian Document Format (ADF) for rich text fields (descrip
 - All other nodes → extract text content, strip formatting
 
 **Plain text → ADF (write)**:
-- Wrap user input in a single ADF paragraph node
-- No attempt to parse markdown or other formatting
-- Simple and predictable: what you type is what gets stored
+
+There are **two distinct ADF builder functions** — use the right one for each context:
+
+- **`text_to_adf_inline(text)`** — wraps a single string in one ADF paragraph. Use for **inline field values** (e.g., transition comment fields collected via a small form, NOT from `$EDITOR`). Produces exactly one paragraph node.
+- **`text_to_adf(text)`** — splits on blank lines (`\n\n`) to produce multiple ADF paragraph nodes. Use for **multi-paragraph content from `$EDITOR`** (comments, TextArea fields). Defined in `jira-api-reference.md`.
+
+Both functions wrap text in the standard ADF doc envelope (`version: 1, type: "doc"`). The difference is whether multi-paragraph structure is preserved.
 
 ```rust
-// Minimal ADF document with a single paragraph
-fn text_to_adf(text: &str) -> serde_json::Value {
+/// Single-paragraph ADF builder for inline/form field values.
+/// NOT for $EDITOR output — use text_to_adf() from jira-api-reference.md for that.
+fn text_to_adf_inline(text: &str) -> serde_json::Value {
     json!({
         "version": 1,
         "type": "doc",

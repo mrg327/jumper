@@ -92,6 +92,10 @@ pub trait ScreenPlugin {
     /// Unique identifier for this plugin (e.g., "jira")
     fn name(&self) -> &str;
 
+    /// Whether this plugin needs periodic tick events (called every 250ms while active).
+    /// The PluginRegistry gates on_tick() calls on this return value. Default: false.
+    fn needs_timer(&self) -> bool { false }
+
     /// Render the full screen into the given area.
     /// Uses Frame (not Buffer) for full-screen rendering.
     fn render(&self, frame: &mut Frame, area: Rect);
@@ -108,16 +112,14 @@ pub trait ScreenPlugin {
     fn on_leave(&mut self);
 
     /// Called every 250ms while this plugin's screen is active.
-    /// Only called when the plugin screen is the current screen.
+    /// Only called when the plugin screen is the current screen AND needs_timer() is true.
     /// Returns notification messages forwarded to PluginSidebar via
     /// push_notification() in the PluginRegistry.
     fn on_tick(&mut self) -> Vec<String> { Vec::new() }
 
-    /// Receive a notification message from another plugin or the system.
-    fn on_notify(&mut self, _message: &str) {}
-
     /// The keybinding hint string shown in the footer bar.
-    fn key_hints(&self) -> Vec<(&str, &str)> { Vec::new() }
+    /// Returns `'static` str pairs — format strings or owned Strings do NOT work here.
+    fn key_hints(&self) -> Vec<(&'static str, &'static str)> { Vec::new() }
 
     /// Called after $EDITOR closes with the edited content.
     /// `context` is the same string passed in PluginAction::LaunchEditor.
@@ -131,6 +133,7 @@ pub trait ScreenPlugin {
 Screen plugins return a **narrow** `PluginAction` enum — not the app's full `Action` enum. The App is responsible for converting `PluginAction` into `Action` for processing.
 
 ```rust
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PluginAction {
     /// Key was handled, no app-level action needed
     None,
@@ -258,9 +261,15 @@ impl ScreenPlugin for JiraPlugin {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> PluginAction {
-        // Modal gets first crack at keys
-        if let Some(modal) = &mut self.modal {
-            return self.handle_modal_key(key, modal);
+        // Modal gets first crack at keys.
+        // IMPORTANT: use `take()` to move the modal out before calling a method
+        // that requires `&mut self`. The two-mutable-borrow pattern
+        //   `if let Some(modal) = &mut self.modal { self.handle_modal_key(key, modal) }`
+        // does NOT compile — `self.modal` and `self` cannot both be borrowed mutably.
+        if let Some(modal) = self.modal.take() {
+            let (action, new_modal) = self.handle_modal_key(key, modal);
+            self.modal = new_modal;
+            return action;
         }
         // Otherwise handle board-level keys
         self.handle_board_key(key)
@@ -319,16 +328,21 @@ plugins:
 To support arbitrary plugin-specific config without modifying jm-core for each new plugin, the `PluginConfig` struct uses `serde(flatten)`:
 
 ```rust
+// Matches the actual config.rs implementation.
+// PomodoroConfig and NotificationsConfig are NOT wrapped in Option<> — they use
+// #[derive(Default)] + #[serde(default)] on the struct so they auto-populate from defaults.
 #[derive(Deserialize)]
 pub struct PluginConfig {
     pub enabled: Vec<String>,
 
-    // Known plugin configs (optional)
-    pub pomodoro: Option<PomodoroConfig>,
-    pub notifications: Option<NotificationsConfig>,
+    // Known plugin configs (non-optional; their structs derive Default)
+    #[serde(default)]
+    pub pomodoro: PomodoroConfig,
+    #[serde(default)]
+    pub notifications: NotificationsConfig,
 
     // Everything else — plugins deserialize from raw Value
-    #[serde(flatten)]
+    #[serde(flatten, default)]
     pub extra: HashMap<String, serde_yml::Value>,
 }
 ```
@@ -379,9 +393,12 @@ When a screen plugin's `on_tick()` returns notification messages, those messages
 
 ```rust
 impl PluginRegistry {
-    pub fn tick_active_screen(&mut self, active_screen: &ScreenId) {
-        if let ScreenId::Plugin(name) = active_screen {
-            if let Some(plugin) = self.screens.iter_mut().find(|p| p.name() == name) {
+    /// Tick the named screen plugin (called every 250ms when a screen plugin is active).
+    /// Takes a `&str` name, not a `&ScreenId`, to avoid importing ScreenId into the plugin module.
+    /// The caller (app.rs) extracts the plugin name from the ScreenId before calling.
+    pub fn tick_screen(&mut self, name: &str) {
+        if let Some(plugin) = self.screens.iter_mut().find(|p| p.name() == name) {
+            if plugin.needs_timer() {
                 let notifications = plugin.on_tick();
                 for msg in notifications {
                     self.sidebar.push_notification(&msg);
@@ -584,7 +601,7 @@ crates/jm-tui/src/plugins/
 │                       #   + PluginAction enum { None, Back, Toast(String), LaunchEditor { content, context } }
 │                       #   + AnyPlugin enum wrapper (if needed for unified dispatch)
 ├── registry.rs         # PluginRegistry { sidebar: PluginSidebar, screens: Vec<Box<dyn ScreenPlugin>> }
-│                       #   + tick_active_screen() with notification forwarding
+│                       #   + tick_screen(name: &str) with notification forwarding
 ├── sidebar.rs          # PluginSidebar container (sidebar rendering/focus)
 ├── clock.rs            # Clock sidebar plugin (impl SidebarPlugin)
 ├── notifications.rs    # Notifications sidebar plugin (impl SidebarPlugin)
@@ -618,16 +635,17 @@ pub trait SidebarPlugin {
 
 pub trait ScreenPlugin {
     fn name(&self) -> &str;
+    fn needs_timer(&self) -> bool { false }               // gates on_tick() in registry
     fn render(&self, frame: &mut Frame, area: Rect);      // Frame (full-screen-style)
     fn handle_key(&mut self, key: KeyEvent) -> PluginAction;
     fn on_enter(&mut self);
     fn on_leave(&mut self);
     fn on_tick(&mut self) -> Vec<String> { Vec::new() }   // 250ms tick rate, active only
-    fn on_notify(&mut self, _message: &str) {}
-    fn key_hints(&self) -> Vec<(&str, &str)> { Vec::new() }
+    fn key_hints(&self) -> Vec<(&'static str, &'static str)> { Vec::new() }  // 'static required
     fn on_editor_complete(&mut self, _content: String, _context: &str) {} // default no-op
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PluginAction {
     None,
     Back,

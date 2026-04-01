@@ -72,6 +72,26 @@ match response.status() {
 
 The API token is generated at https://id.atlassian.com/manage-profile/security/api-tokens. It is NOT an OAuth token or PAT.
 
+### Rate Limiting Retry Policy
+
+When a `429` is received, the background thread should retry according to the type of command:
+
+- **`FetchMyIssues` (auto-refresh)**: Retry up to **3 times** using the `Retry-After` delay between each attempt. On the 4th `429`, send `JiraResult::Error` to the TUI thread and stop retrying.
+- **User-initiated write commands** (`TransitionIssue`, `UpdateField`, `CreateIssue`, `AddComment`): Retry **once** with a toast notification ("JIRA rate limit, retrying in Xs"). On the second `429`, send `JiraResult::Error` immediately. Do NOT silently retry write commands — the user needs to know their action was delayed.
+
+Implement the retry delay as a loop using `recv_timeout(Duration::from_millis(100))` chunks (not `thread::sleep`) so the shutdown `AtomicBool` is polled frequently:
+
+```rust
+// Interruptible sleep that respects the shutdown flag
+fn interruptible_sleep(shutdown: &Arc<AtomicBool>, secs: u64, commands: &mpsc::Receiver<JiraCommand>) {
+    let target = std::time::Instant::now() + Duration::from_secs(secs);
+    while std::time::Instant::now() < target {
+        if shutdown.load(Ordering::Relaxed) { return; }
+        let _ = commands.recv_timeout(Duration::from_millis(100));
+    }
+}
+```
+
 ---
 
 ## Pagination Pattern
@@ -317,6 +337,40 @@ Query params:
 **Pagination**: Loop while `!issues.is_empty() && issues.len() >= max_results`. See Pagination Pattern section above for rationale.
 
 **Custom field IDs**: `story_points_field` and `sprint_field` are dynamic. Either from config or from field discovery (endpoint 3). Include them in the `fields` query param.
+
+**Rust deserialization strategy** — PRESCRIBED approach for `issues[*].fields`:
+
+Use `serde_json::Value` for the entire `fields` blob in the raw deserialization struct. Do NOT attempt to deserialize `fields` as a typed struct with `#[serde(flatten)]` or `#[serde(deny_unknown_fields)]` — JIRA instances have hundreds of custom fields that vary per-tenant, and a typed struct would fail to deserialize on any field not explicitly listed.
+
+```rust
+// Prescribed raw deserialization struct for /search issues
+#[derive(Deserialize)]
+struct RawIssue {
+    key: String,
+    #[serde(default)]
+    fields: serde_json::Value,  // ALWAYS use Value — never typed struct with flatten
+}
+
+#[derive(Deserialize)]
+struct SearchResponse {
+    issues: Vec<RawIssue>,
+    #[serde(rename = "startAt")]
+    start_at: usize,
+    #[serde(rename = "maxResults")]
+    max_results: usize,
+}
+
+// Extract individual fields from Value using .get() — never index directly with ["key"]
+// (direct indexing returns Value::Null on missing keys, which panics on .as_str().unwrap())
+fn extract_summary(fields: &serde_json::Value) -> String {
+    fields.get("summary")
+        .and_then(|v| v.as_str())
+        .unwrap_or("(no summary)")
+        .to_string()
+}
+```
+
+Then convert `RawIssue` into `JiraIssue` by applying the field extraction rules above.
 
 ---
 
@@ -734,9 +788,10 @@ GET /rest/api/3/issue/HMI-103/editmeta
 - `schema.type` → `FieldType` mapping:
   - `"string"` → `Text`
   - `"number"` → `Number`
-  - `"priority"`, `"resolution"`, `"option"` (with `allowedValues`) → `Select`
-  - `"array"` with `items: "string"` (labels) → `Text` (comma-separated input)
-  - `"user"`, `"version"`, `"array"` with object items → `Unsupported`
+  - `"priority"`, `"resolution"`, `"option"` (when `allowedValues` is non-empty) → `Select`
+  - `"array"` with `items: "string"` (e.g., labels) → `Text` (comma-separated input)
+  - `"array"` with `items` being an object type (e.g., `"component"`, `"version"`) AND `allowedValues` is non-empty → `MultiSelect`
+  - `"user"`, `"version"` (without allowedValues), `"array"` with `autoCompleteUrl` but no `allowedValues` → `Unsupported`
   - Anything else → `Unsupported`
 - Fields with `autoCompleteUrl` but no `allowedValues` → treat as free text
 
@@ -1125,17 +1180,30 @@ struct JiraTransition {
     required_fields: Vec<TransitionField>, // from .fields map, filtered to required
 }
 
+// NOTE: TransitionField includes `field_type: FieldType` (derived from schema.type in the
+// transitions API response). Use the same schema.type → FieldType mapping as editmeta.
+// `is_comment: true` overrides `field_type` for rendering — always use $EDITOR flow.
 struct TransitionField {
     field_id: String,
     name: String,
+    field_type: FieldType,               // derived from schema.type
     allowed_values: Vec<AllowedValue>,
     is_comment: bool,  // true if field_id == "comment" (uses "update" key in POST)
 }
 ```
 
-### Endpoints to REMOVE from `JiraCommand`
+### `JiraError` — authoritative definition
 
-- `GET /rest/api/3/issue/{key}` — not needed, search response has all data
-- `GET /rest/api/3/status` — derive from issue data, not a separate call
+`JiraError` is defined as a **plain struct** in `jira-plugin.md`. This is the canonical definition. Use it as-is:
+
+```rust
+pub struct JiraError {
+    pub status_code: u16,
+    pub error_messages: Vec<String>,
+    pub field_errors: HashMap<String, String>,  // field_id → error message
+}
+```
+
+The `RateLimited`/`Api` enum variant approach shown in the authentication section's pseudocode (`Err(JiraError::RateLimited { ... })`) is pseudocode for the HTTP error handling layer in `api.rs`. In the real implementation, convert both rate-limit and API errors into `JiraError { status_code, ... }` before sending through the channel as `JiraResult::Error`. The background thread does not need to distinguish these cases externally; the `status_code` field carries that information.
 
 If individual issue refresh is ever needed, add it later.
