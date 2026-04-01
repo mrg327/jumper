@@ -10,6 +10,7 @@ mod notifications;
 mod pomodoro;
 mod sidebar;
 pub mod about;
+pub mod jira;
 pub mod registry;
 
 pub use clock::ClockPlugin;
