@@ -246,6 +246,14 @@ pub struct JiraPlugin {
 
     // ── Toast queue ──────────────────────────────────────────────────────
     pub(crate) pending_toasts: Vec<String>,
+
+    // ── Post-write refresh timer ─────────────────────────────────────
+    pub(crate) pending_refresh_at: Option<Instant>,
+
+    // ── Optimistic UI revert data ────────────────────────────────────
+    /// Stores original status before an optimistic transition so we can
+    /// revert if the API call fails. Key: issue key, Value: original status.
+    pub(crate) pending_transitions: HashMap<String, JiraStatus>,
 }
 
 impl JiraPlugin {
@@ -286,6 +294,9 @@ impl JiraPlugin {
             last_error: None,
 
             pending_toasts: Vec::new(),
+
+            pending_refresh_at: None,
+            pending_transitions: HashMap::new(),
         }
     }
 
@@ -306,6 +317,52 @@ impl JiraPlugin {
                 }
                 true
             })
+            .collect()
+    }
+
+    /// Send a command to the background API thread.
+    pub(crate) fn send_command(&self, cmd: JiraCommand) {
+        if let Some(tx) = &self.command_tx {
+            tx.send(cmd).ok();
+        }
+    }
+
+    /// Trigger a full issue list refresh via the background thread.
+    ///
+    /// Increments the generation counter and sends `FetchMyIssues`.
+    /// Skipped if a refresh is already in-flight (`self.refreshing`).
+    pub(crate) fn trigger_refresh(&mut self) {
+        if !self.refreshing {
+            self.generation += 1;
+            self.refreshing = true;
+            self.send_command(JiraCommand::FetchMyIssues {
+                generation: self.generation,
+            });
+        }
+    }
+
+    /// Schedule a post-write refresh with a 500ms delay.
+    ///
+    /// JIRA has eventual consistency — immediate reads after writes may return
+    /// stale data. The 500ms delay is checked in `on_tick()`.
+    pub(crate) fn schedule_post_write_refresh(&mut self) {
+        self.pending_refresh_at =
+            Some(Instant::now() + std::time::Duration::from_millis(500));
+        self.refreshing = true;
+    }
+
+    /// Find an issue by key in the loaded issue list.
+    pub(crate) fn find_issue(&self, key: &str) -> Option<&JiraIssue> {
+        self.issues.iter().find(|i| i.key == key)
+    }
+
+    /// Return a deduplicated list of (project_key, project_name) from loaded issues.
+    pub(crate) fn distinct_projects(&self) -> Vec<(String, String)> {
+        let mut seen = HashSet::new();
+        self.issues
+            .iter()
+            .filter(|i| seen.insert(i.project_key.clone()))
+            .map(|i| (i.project_key.clone(), i.project_name.clone()))
             .collect()
     }
 
@@ -421,6 +478,13 @@ impl ScreenPlugin for JiraPlugin {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> PluginAction {
+        // Deliver pending toasts one at a time before dispatching keys.
+        // This ensures toasts from background operations reach the app.
+        if !self.pending_toasts.is_empty() {
+            let msg = self.pending_toasts.remove(0);
+            return PluginAction::Toast(msg);
+        }
+
         // Modal gets first crack at keys
         match &self.modal {
             Some(JiraModal::IssueDetail { .. }) => {
@@ -442,8 +506,14 @@ impl ScreenPlugin for JiraPlugin {
                 return create::handle_create_form_key(key, self);
             }
             Some(JiraModal::ErrorModal { .. }) => {
-                // Dismiss error modal on any key
-                self.modal = None;
+                // Dismiss error modal only on Enter or Esc
+                use crossterm::event::KeyCode;
+                match key.code {
+                    KeyCode::Enter | KeyCode::Esc => {
+                        self.modal = None;
+                    }
+                    _ => {}
+                }
                 return PluginAction::None;
             }
             None => {}
@@ -455,32 +525,154 @@ impl ScreenPlugin for JiraPlugin {
 
     fn on_enter(&mut self) {
         self.loading = true;
-        // Stub — full implementation will validate credentials, spawn background
-        // thread, and send initial FetchMyIssues command.
+
+        // 1. Validate config (url, email, JIRA_API_TOKEN env var).
+        if let Err(msg) = self.config.validate() {
+            self.modal = Some(JiraModal::ErrorModal {
+                title: "Configuration Error".to_string(),
+                message: msg,
+            });
+            self.loading = false;
+            return;
+        }
+
+        // 2. Thread lifecycle guard — clean up any previous thread.
+        if let Some(handle) = self.thread_handle.take() {
+            // If shutdown was previously requested, join the old thread first
+            // to avoid a race where the old thread exits after the new one spawns.
+            if self
+                .shutdown_flag
+                .as_ref()
+                .map_or(false, |f| f.load(Ordering::Relaxed))
+            {
+                let _ = handle.join();
+            } else if handle.is_finished() {
+                // Thread already exited on its own — just clean up
+                let _ = handle.join();
+            } else {
+                // Thread is still running but not shut down — signal and join
+                if let Some(flag) = &self.shutdown_flag {
+                    flag.store(true, Ordering::Relaxed);
+                }
+                if let Some(tx) = &self.command_tx {
+                    let _ = tx.send(JiraCommand::Shutdown);
+                }
+                let _ = handle.join();
+            }
+            self.command_tx = None;
+            self.result_rx = None;
+            self.shutdown_flag = None;
+        }
+
+        // 3. Validate credentials synchronously via GET /rest/api/3/myself.
+        let api_token = std::env::var("JIRA_API_TOKEN").unwrap_or_default();
+        match api::validate_credentials(&self.config.url, &self.config.email, &api_token) {
+            Ok(myself) => {
+                self.account_id = Some(myself.account_id);
+            }
+            Err(err) => {
+                self.modal = Some(JiraModal::ErrorModal {
+                    title: "Authentication Failed".to_string(),
+                    message: format!(
+                        "Could not connect to JIRA.\n\n{}\n\nCheck JIRA_API_TOKEN and plugins.jira.email in config.",
+                        err.display()
+                    ),
+                });
+                self.loading = false;
+                return;
+            }
+        }
+
+        // 4. Create channels.
+        let (cmd_tx, cmd_rx) = mpsc::channel();
+        let (res_tx, res_rx) = mpsc::channel();
+
+        // 5. Create shutdown flag.
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        // 6. Spawn background thread.
+        let thread_base_url = self.config.url.clone();
+        let thread_email = self.config.email.clone();
+        let thread_api_token = api_token;
+        let thread_account_id = self.account_id.clone().unwrap_or_default();
+        let thread_sp_field = self.story_points_field.clone();
+        let thread_sprint_field = self.sprint_field.clone();
+        let thread_shutdown = shutdown.clone();
+
+        let handle = std::thread::Builder::new()
+            .name("jira-api".to_string())
+            .spawn(move || {
+                api::api_thread_loop(
+                    cmd_rx,
+                    res_tx,
+                    thread_base_url,
+                    thread_email,
+                    thread_api_token,
+                    thread_account_id,
+                    thread_sp_field,
+                    thread_sprint_field,
+                    thread_shutdown,
+                );
+            })
+            .ok();
+
+        // 7. Store handles.
+        self.command_tx = Some(cmd_tx);
+        self.result_rx = Some(res_rx);
+        self.shutdown_flag = Some(shutdown);
+        self.thread_handle = handle;
+
+        // 8. Send initial commands — fetch issues and field definitions.
+        self.generation += 1;
+        self.refreshing = true;
+        self.send_command(JiraCommand::FetchMyIssues {
+            generation: self.generation,
+        });
+        self.send_command(JiraCommand::FetchFields);
     }
 
     fn on_leave(&mut self) {
-        // Signal background thread to shut down
+        // 1. Signal shutdown via AtomicBool + Shutdown command
         if let Some(flag) = &self.shutdown_flag {
             flag.store(true, Ordering::Relaxed);
         }
-        // Send explicit Shutdown command
         if let Some(tx) = &self.command_tx {
             let _ = tx.send(JiraCommand::Shutdown);
         }
-        // Wait for the thread to finish
+
+        // 2. Join the thread
         if let Some(handle) = self.thread_handle.take() {
             let _ = handle.join();
         }
-        // Clear channel endpoints
+
+        // 3. Clear all handles
         self.command_tx = None;
         self.result_rx = None;
         self.shutdown_flag = None;
+
+        // 4. Clear data, modal state, pending toasts
+        self.issues.clear();
+        self.field_defs.clear();
+        self.modal = None;
+        self.previous_modal = None;
+        self.pending_toasts.clear();
+        self.pending_transitions.clear();
+        self.board = BoardState::default();
+        self.project_filter = None;
+        self.show_done = false;
+
+        // 5. Reset loading/refreshing/last_sync/last_error
+        self.loading = false;
+        self.refreshing = false;
+        self.last_sync = None;
+        self.last_error = None;
+        self.pending_refresh_at = None;
     }
 
     fn on_tick(&mut self) -> Vec<String> {
         let mut notifications = Vec::new();
         let mut needs_rebuild = false;
+        let mut channel_disconnected = false;
 
         // Drain all pending results from the background thread.
         // Collect results first to avoid borrow conflicts.
@@ -489,8 +681,15 @@ impl ScreenPlugin for JiraPlugin {
             .as_ref()
             .map(|rx| {
                 let mut batch = Vec::new();
-                while let Ok(result) = rx.try_recv() {
-                    batch.push(result);
+                loop {
+                    match rx.try_recv() {
+                        Ok(result) => batch.push(result),
+                        Err(mpsc::TryRecvError::Empty) => break,
+                        Err(mpsc::TryRecvError::Disconnected) => {
+                            channel_disconnected = true;
+                            break;
+                        }
+                    }
                 }
                 batch
             })
@@ -502,28 +701,248 @@ impl ScreenPlugin for JiraPlugin {
                     generation,
                     issues,
                 } => {
+                    // Always clear refreshing, even for stale results
+                    self.refreshing = false;
+
                     // Only apply if generation matches (prevent stale overwrites)
                     if generation >= self.generation {
                         self.issues = issues;
                         self.loading = false;
-                        self.refreshing = false;
                         self.last_sync = Some(Instant::now());
                         self.last_error = None;
                         needs_rebuild = true;
-                    } else {
-                        // Stale result — still clear refreshing flag
-                        self.refreshing = false;
+
+                        // Stale detail modal check: if detail modal is open,
+                        // verify the viewed issue still exists.
+                        if let Some(JiraModal::IssueDetail { ref issue_key, .. }) = self.modal {
+                            let key = issue_key.clone();
+                            if self.find_issue(&key).is_none() {
+                                self.modal = None;
+                                self.pending_toasts.push(
+                                    "Issue no longer assigned to you".to_string(),
+                                );
+                            }
+                        }
                     }
                 }
+
+                JiraResult::Transitions(key, transitions) => {
+                    // Update IssueDetail modal if it's open for this issue
+                    if let Some(JiraModal::IssueDetail {
+                        ref issue_key,
+                        transitions: ref mut modal_transitions,
+                        ..
+                    }) = self.modal
+                    {
+                        if *issue_key == key {
+                            *modal_transitions = Some(transitions.clone());
+                        }
+                    }
+                    // If a TransitionPicker is pending for this key, it will be
+                    // handled by the detail/board key handlers directly.
+                }
+
+                JiraResult::TransitionComplete(key) => {
+                    // Clear optimistic revert data — transition succeeded
+                    self.pending_transitions.remove(&key);
+                    self.pending_toasts
+                        .push(format!("Transitioned {}", key));
+                    self.schedule_post_write_refresh();
+                }
+
+                JiraResult::TransitionFailed(key, error) => {
+                    // Revert optimistic UI — restore original status
+                    if let Some(original_status) = self.pending_transitions.remove(&key) {
+                        if let Some(issue) =
+                            self.issues.iter_mut().find(|i| i.key == key)
+                        {
+                            issue.status = original_status;
+                            needs_rebuild = true;
+                        }
+                    }
+                    self.refreshing = false;
+                    // User-initiated action — blocking error modal
+                    self.modal = Some(JiraModal::ErrorModal {
+                        title: format!("Failed to transition {}", key),
+                        message: error.display(),
+                    });
+                    self.pending_toasts
+                        .push(format!("Transition failed: {}", key));
+                }
+
+                JiraResult::FieldUpdated(key, field_id) => {
+                    self.pending_toasts
+                        .push(format!("Updated {} on {}", field_id, key));
+                    self.schedule_post_write_refresh();
+                }
+
+                JiraResult::CommentAdded(key) => {
+                    self.pending_toasts
+                        .push(format!("Comment added to {}", key));
+                    self.schedule_post_write_refresh();
+                }
+
+                JiraResult::Comments(key, comments) => {
+                    // Update IssueDetail modal's comments if open for this issue
+                    if let Some(JiraModal::IssueDetail {
+                        ref issue_key,
+                        comments: ref mut modal_comments,
+                        ..
+                    }) = self.modal
+                    {
+                        if *issue_key == key {
+                            *modal_comments = Some(comments);
+                        }
+                    }
+                }
+
+                JiraResult::CreateMeta(response) => {
+                    // Transition from loading CreateForm to populated CreateForm.
+                    // The modal should already be in a loading state or we need to
+                    // check if we're expecting this response.
+                    if let Some(JiraModal::SelectIssueType {
+                        ref project_key,
+                        ref issue_types,
+                        cursor,
+                        ..
+                    }) = self.modal
+                    {
+                        // We got createmeta while still on SelectIssueType — this
+                        // shouldn't normally happen. Just store it.
+                        let _ = (project_key, issue_types, cursor);
+                    }
+                    // More commonly, we're in a transitional state where the form
+                    // was requested. Look for a CreateForm with Submitting state
+                    // or transition directly.
+                    if let Some(JiraModal::CreateForm {
+                        ref project_key,
+                        ref issue_type_id,
+                        ..
+                    }) = self.modal
+                    {
+                        // CreateForm already exists — update its fields
+                        let pk = project_key.clone();
+                        let it = issue_type_id.clone();
+                        let fields_with_values: Vec<(EditableField, Option<FieldValue>)> =
+                            response.fields.into_iter().map(|f| (f, None)).collect();
+                        self.modal = Some(JiraModal::CreateForm {
+                            project_key: pk,
+                            issue_type_id: it,
+                            fields: fields_with_values,
+                            form: FormState::Navigating { cursor: 0 },
+                        });
+                    } else {
+                        // Store the response — the key handlers will pick it up
+                        // when transitioning from SelectIssueType to CreateForm.
+                        // We need to create the CreateForm modal from context.
+                        // The previous_modal may hold context.
+                        if let Some(JiraModal::SelectIssueType {
+                            ref project_key,
+                            ref issue_types,
+                            cursor,
+                        }) = self.previous_modal
+                        {
+                            let pk = project_key.clone();
+                            let it_id = issue_types
+                                .get(cursor)
+                                .map(|t| t.id.clone())
+                                .unwrap_or_default();
+                            let fields_with_values: Vec<(EditableField, Option<FieldValue>)> =
+                                response.fields.into_iter().map(|f| (f, None)).collect();
+                            self.modal = Some(JiraModal::CreateForm {
+                                project_key: pk,
+                                issue_type_id: it_id,
+                                fields: fields_with_values,
+                                form: FormState::Navigating { cursor: 0 },
+                            });
+                            self.previous_modal = None;
+                        }
+                    }
+                }
+
+                JiraResult::IssueCreated(key) => {
+                    self.modal = None;
+                    self.pending_toasts.push(format!("Created {}", key));
+                    self.schedule_post_write_refresh();
+                }
+
+                JiraResult::EditMeta(key, fields) => {
+                    // Update IssueDetail modal's editable fields if open for this issue
+                    if let Some(JiraModal::IssueDetail {
+                        ref issue_key,
+                        fields: ref mut modal_fields,
+                        ..
+                    }) = self.modal
+                    {
+                        if *issue_key == key {
+                            *modal_fields = Some(fields);
+                        }
+                    }
+                }
+
+                JiraResult::Fields(field_defs) => {
+                    // Discover story_points and sprint field IDs from field definitions
+                    if self.story_points_field.is_none() {
+                        let sp_matches: Vec<&JiraFieldDef> = field_defs
+                            .iter()
+                            .filter(|f| {
+                                f.custom
+                                    && f.name.to_lowercase().contains("story point")
+                            })
+                            .collect();
+                        if sp_matches.len() == 1 {
+                            self.story_points_field = Some(sp_matches[0].id.clone());
+                        }
+                    }
+                    if self.sprint_field.is_none() {
+                        let sprint_matches: Vec<&JiraFieldDef> = field_defs
+                            .iter()
+                            .filter(|f| {
+                                f.custom
+                                    && f.name.to_lowercase().contains("sprint")
+                            })
+                            .collect();
+                        if sprint_matches.len() == 1 {
+                            self.sprint_field = Some(sprint_matches[0].id.clone());
+                        }
+                    }
+                    self.field_defs = field_defs;
+                }
+
+                JiraResult::IssueTypes(project_key, types) => {
+                    // Transition from SelectProject to SelectIssueType modal
+                    self.modal = Some(JiraModal::SelectIssueType {
+                        project_key,
+                        issue_types: types,
+                        cursor: 0,
+                    });
+                }
+
                 JiraResult::Error { context, error } => {
                     let msg = format!("JIRA: {} — {}", context, error.display());
-                    notifications.push(msg.clone());
+
+                    // Determine if this was a user-initiated action or auto-refresh.
+                    // User-initiated contexts contain action verbs (Transition, Update,
+                    // Add, Create). Auto-refresh contexts are fetch operations.
+                    let is_user_action = context.starts_with("Transition")
+                        || context.starts_with("Updat")
+                        || context.starts_with("Add")
+                        || context.starts_with("Creat");
+
+                    if is_user_action {
+                        // Blocking error modal for user actions
+                        self.modal = Some(JiraModal::ErrorModal {
+                            title: format!("JIRA Error: {}", context),
+                            message: error.display(),
+                        });
+                    } else {
+                        // Non-blocking toast for auto-refresh errors
+                        notifications.push(msg.clone());
+                    }
                     self.last_error = Some(msg);
                     self.loading = false;
                     self.refreshing = false;
                 }
-                // Other result types will be handled by Agent 2
-                _ => {}
             }
         }
 
@@ -531,7 +950,40 @@ impl ScreenPlugin for JiraPlugin {
             self.rebuild_columns();
         }
 
-        // Drain pending toasts
+        // Handle disconnected channel — background thread panicked
+        if channel_disconnected && self.thread_handle.is_some() {
+            self.loading = false;
+            self.refreshing = false;
+            self.thread_handle = None;
+            self.command_tx = None;
+            self.result_rx = None;
+            self.shutdown_flag = None;
+            self.modal = Some(JiraModal::ErrorModal {
+                title: "JIRA Connection Lost".to_string(),
+                message: "Background thread disconnected. Press Esc to return to dashboard, then reopen JIRA to reconnect.".to_string(),
+            });
+        }
+
+        // Auto-refresh timer: if time since last_sync exceeds refresh_interval_secs
+        // and not refreshing, trigger refresh.
+        if let Some(last) = self.last_sync {
+            let interval = std::time::Duration::from_secs(self.config.refresh_interval_secs);
+            if last.elapsed() >= interval && !self.refreshing && !self.loading {
+                self.trigger_refresh();
+            }
+        }
+
+        // Post-write refresh: check if pending_refresh_at has elapsed.
+        if let Some(refresh_at) = self.pending_refresh_at {
+            if Instant::now() >= refresh_at {
+                self.pending_refresh_at = None;
+                // Force refreshing to false so trigger_refresh doesn't skip
+                self.refreshing = false;
+                self.trigger_refresh();
+            }
+        }
+
+        // Drain pending toasts into notifications
         notifications.extend(self.pending_toasts.drain(..));
 
         notifications
@@ -581,7 +1033,51 @@ impl ScreenPlugin for JiraPlugin {
         }
     }
 
-    fn on_editor_complete(&mut self, _content: String, _context: &str) {
-        // Stub — will be implemented to handle comment and description editing.
+    fn on_editor_complete(&mut self, content: String, context: &str) {
+        // Empty content means the user quit the editor without writing — cancel.
+        if content.trim().is_empty() {
+            return;
+        }
+
+        if let Some(issue_key) = context.strip_prefix("comment:") {
+            // Convert plain text to ADF and send as a JIRA comment
+            let adf_body = adf::text_to_adf(&content);
+            self.refreshing = true;
+            self.send_command(JiraCommand::AddComment {
+                issue_key: issue_key.to_string(),
+                body: adf_body,
+            });
+        } else if let Some(rest) = context.strip_prefix("transition_comment:") {
+            // Format: "transition_comment:{issue_key}:{transition_id}"
+            if let Some((issue_key, transition_id)) = rest.split_once(':') {
+                let adf_body = adf::text_to_adf(&content);
+                let fields = serde_json::json!({
+                    "update": {
+                        "comment": [{
+                            "add": {
+                                "body": adf_body
+                            }
+                        }]
+                    }
+                });
+                self.refreshing = true;
+                self.send_command(JiraCommand::TransitionIssue {
+                    issue_key: issue_key.to_string(),
+                    transition_id: transition_id.to_string(),
+                    fields: Some(fields),
+                });
+            }
+        } else if let Some(rest) = context.strip_prefix("textarea:") {
+            // Format: "textarea:{issue_key}:{field_id}"
+            if let Some((issue_key, field_id)) = rest.split_once(':') {
+                let adf_body = adf::text_to_adf(&content);
+                self.refreshing = true;
+                self.send_command(JiraCommand::UpdateField {
+                    issue_key: issue_key.to_string(),
+                    field_id: field_id.to_string(),
+                    value: adf_body,
+                });
+            }
+        }
     }
 }
