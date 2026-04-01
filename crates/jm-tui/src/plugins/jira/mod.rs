@@ -68,7 +68,9 @@ pub(crate) struct StatusColumn {
 /// lives in the `JiraModal` variant, NOT inside `FormState`.
 pub(crate) enum FormState {
     /// Navigating between fields. j/k moves cursor, Enter enters edit mode.
-    Navigating { cursor: usize },
+    /// `scroll_offset` tracks the first visible field row when the field count
+    /// exceeds the modal's visible height (cursor-follows algorithm).
+    Navigating { cursor: usize, scroll_offset: usize },
 
     /// Editing a text or number field inline.
     EditingText {
@@ -94,8 +96,10 @@ pub(crate) enum FormState {
     Submitting,
 
     /// API returned validation errors. Fields marked with errors.
+    /// `scroll_offset` preserved from the Navigating state to keep view consistent.
     ValidationError {
         cursor: usize,
+        scroll_offset: usize,
         errors: HashMap<String, String>,
     },
 }
@@ -469,9 +473,8 @@ impl ScreenPlugin for JiraPlugin {
             Some(JiraModal::CreateForm { .. }) => {
                 create::render_create_form(frame, area, self);
             }
-            Some(JiraModal::ErrorModal { .. }) => {
-                // Error modal rendering will be done by Agent 2
-                let _ = (frame, area);
+            Some(JiraModal::ErrorModal { title, message }) => {
+                detail::render_error_modal(frame, area, title, message);
             }
             None => {}
         }
@@ -510,7 +513,7 @@ impl ScreenPlugin for JiraPlugin {
                 use crossterm::event::KeyCode;
                 match key.code {
                     KeyCode::Enter | KeyCode::Esc => {
-                        self.modal = None;
+                        self.modal = self.previous_modal.take();
                     }
                     _ => {}
                 }
@@ -738,8 +741,17 @@ impl ScreenPlugin for JiraPlugin {
                             *modal_transitions = Some(transitions.clone());
                         }
                     }
-                    // If a TransitionPicker is pending for this key, it will be
-                    // handled by the detail/board key handlers directly.
+                    // Update TransitionPicker modal if it's open for this issue
+                    if let Some(JiraModal::TransitionPicker {
+                        ref issue_key,
+                        transitions: ref mut picker_transitions,
+                        ..
+                    }) = self.modal
+                    {
+                        if *issue_key == key {
+                            *picker_transitions = transitions;
+                        }
+                    }
                 }
 
                 JiraResult::TransitionComplete(key) => {
@@ -762,6 +774,8 @@ impl ScreenPlugin for JiraPlugin {
                     }
                     self.refreshing = false;
                     // User-initiated action — blocking error modal
+                    // Save the current modal so it can be restored after dismissal
+                    self.previous_modal = self.modal.take();
                     self.modal = Some(JiraModal::ErrorModal {
                         title: format!("Failed to transition {}", key),
                         message: error.display(),
@@ -829,7 +843,7 @@ impl ScreenPlugin for JiraPlugin {
                             project_key: pk,
                             issue_type_id: it,
                             fields: fields_with_values,
-                            form: FormState::Navigating { cursor: 0 },
+                            form: FormState::Navigating { cursor: 0, scroll_offset: 0 },
                         });
                     } else {
                         // Store the response — the key handlers will pick it up
@@ -853,7 +867,7 @@ impl ScreenPlugin for JiraPlugin {
                                 project_key: pk,
                                 issue_type_id: it_id,
                                 fields: fields_with_values,
-                                form: FormState::Navigating { cursor: 0 },
+                                form: FormState::Navigating { cursor: 0, scroll_offset: 0 },
                             });
                             self.previous_modal = None;
                         }
@@ -931,6 +945,7 @@ impl ScreenPlugin for JiraPlugin {
 
                     if is_user_action {
                         // Blocking error modal for user actions
+                        self.previous_modal = self.modal.take();
                         self.modal = Some(JiraModal::ErrorModal {
                             title: format!("JIRA Error: {}", context),
                             message: error.display(),

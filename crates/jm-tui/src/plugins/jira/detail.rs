@@ -43,6 +43,16 @@ fn truncate_str(s: &str, max: usize) -> String {
     }
 }
 
+/// Convert a character index to a byte index in a string.
+/// Returns the byte position of the nth character, or the string's byte length
+/// if n >= char count.
+fn char_to_byte_idx(s: &str, char_idx: usize) -> usize {
+    s.char_indices()
+        .nth(char_idx)
+        .map(|(byte_idx, _)| byte_idx)
+        .unwrap_or(s.len())
+}
+
 // ── Detail modal rendering ──────────────────────────────────────────────────
 
 /// Render the issue detail modal overlay.
@@ -303,7 +313,7 @@ pub(super) fn render_form_fields(frame: &mut Frame, inner: Rect, fields: &[(Edit
     let ch = inner.height.saturating_sub(1) as usize;
     let lw = fields.iter().map(|(f, _)| f.name.len()).max().unwrap_or(8).min(20);
     let fc = match form {
-        FormState::Navigating { cursor } | FormState::EditingText { cursor, .. } => *cursor,
+        FormState::Navigating { cursor, .. } | FormState::EditingText { cursor, .. } => *cursor,
         FormState::SelectOpen { field_cursor, .. } | FormState::MultiSelectOpen { field_cursor, .. } => *field_cursor,
         FormState::ValidationError { cursor, .. } => *cursor,
         FormState::Submitting => usize::MAX,
@@ -482,7 +492,7 @@ fn start_detail_field_edit(plugin: &mut JiraPlugin) {
     let new_es = match editable.field_type {
         FieldType::Text | FieldType::Number | FieldType::Date => {
             let cv = get_current_field_value(iss, cursor_name);
-            Some(DetailEditState::EditingText { field_id: editable.field_id.clone(), buffer: cv.clone(), cursor_pos: cv.len() })
+            Some(DetailEditState::EditingText { field_id: editable.field_id.clone(), buffer: cv.clone(), cursor_pos: cv.chars().count() })
         }
         FieldType::Select => editable.allowed_values.as_ref().map(|allowed| {
             let cv = get_current_field_value(iss, cursor_name);
@@ -529,15 +539,16 @@ fn handle_detail_edit_key(key: KeyEvent, plugin: &mut JiraPlugin) -> PluginActio
     if edit_type == "text" {
         let Some(JiraModal::IssueDetail { edit_state: Some(DetailEditState::EditingText { buffer, cursor_pos, .. }), .. }) = &mut plugin.modal else { return PluginAction::None; };
         match key.code {
-            KeyCode::Char(c) => { buffer.insert(*cursor_pos, c); *cursor_pos += 1; }
-            KeyCode::Backspace => { if *cursor_pos > 0 { buffer.remove(*cursor_pos - 1); *cursor_pos -= 1; } }
-            KeyCode::Delete => { if *cursor_pos < buffer.len() { buffer.remove(*cursor_pos); } }
+            KeyCode::Char(c) => { buffer.insert(char_to_byte_idx(buffer, *cursor_pos), c); *cursor_pos += 1; }
+            KeyCode::Backspace => { if *cursor_pos > 0 { buffer.remove(char_to_byte_idx(buffer, *cursor_pos - 1)); *cursor_pos -= 1; } }
+            KeyCode::Delete => { if *cursor_pos < buffer.chars().count() { buffer.remove(char_to_byte_idx(buffer, *cursor_pos)); } }
             KeyCode::Left => { if *cursor_pos > 0 { *cursor_pos -= 1; } }
-            KeyCode::Right => { if *cursor_pos < buffer.len() { *cursor_pos += 1; } }
+            KeyCode::Right => { if *cursor_pos < buffer.chars().count() { *cursor_pos += 1; } }
             KeyCode::Home => *cursor_pos = 0,
-            KeyCode::End => *cursor_pos = buffer.len(),
+            KeyCode::End => *cursor_pos = buffer.chars().count(),
             KeyCode::Enter => {
                 let v = buffer.clone();
+                plugin.refreshing = true;
                 if let Some(tx) = &plugin.command_tx { tx.send(JiraCommand::UpdateField { issue_key, field_id, value: serde_json::json!(v) }).ok(); }
                 if let Some(JiraModal::IssueDetail { edit_state, .. }) = &mut plugin.modal { *edit_state = None; }
             }
@@ -552,6 +563,7 @@ fn handle_detail_edit_key(key: KeyEvent, plugin: &mut JiraPlugin) -> PluginActio
             KeyCode::Enter => {
                 let sid = options.get(*cursor).map(|v| v.id.clone());
                 if let Some(id) = sid {
+                    plugin.refreshing = true;
                     if let Some(tx) = &plugin.command_tx { tx.send(JiraCommand::UpdateField { issue_key, field_id, value: serde_json::json!({ "id": id }) }).ok(); }
                 }
                 if let Some(JiraModal::IssueDetail { edit_state, .. }) = &mut plugin.modal { *edit_state = None; }
@@ -583,13 +595,32 @@ pub(crate) fn handle_transition_picker_key(key: KeyEvent, plugin: &mut JiraPlugi
             let selected = { let Some(JiraModal::TransitionPicker { transitions, cursor, .. }) = &plugin.modal else { return PluginAction::None; }; transitions.get(*cursor).cloned() };
             let Some(sel) = selected else { return PluginAction::None; };
             if !sel.required_fields.is_empty() {
-                let ff: Vec<(EditableField, Option<FieldValue>)> = sel.required_fields.iter().map(|tf| {
+                let has_comment = sel.required_fields.iter().any(|f| f.is_comment);
+                let non_comment_fields: Vec<&TransitionField> = sel.required_fields.iter().filter(|f| !f.is_comment).collect();
+                if has_comment && non_comment_fields.is_empty() {
+                    // Only required field is a comment — launch $EDITOR
+                    return PluginAction::LaunchEditor {
+                        content: String::new(),
+                        context: format!("transition_comment:{}:{}", issue_key, sel.id),
+                    };
+                }
+                // Build form fields, filtering out comment fields
+                let ff: Vec<(EditableField, Option<FieldValue>)> = sel.required_fields.iter().filter(|tf| !tf.is_comment).map(|tf| {
                     (EditableField { field_id: tf.field_id.clone(), name: tf.name.clone(), field_type: tf.field_type.clone(), required: true, allowed_values: if tf.allowed_values.is_empty() { None } else { Some(tf.allowed_values.clone()) } }, None)
                 }).collect();
                 let cur = plugin.modal.take();
                 plugin.previous_modal = cur;
-                plugin.modal = Some(JiraModal::TransitionFields { issue_key: issue_key.clone(), transition: sel, fields: ff, form: FormState::Navigating { cursor: 0 } });
+                plugin.modal = Some(JiraModal::TransitionFields { issue_key: issue_key.clone(), transition: sel, fields: ff, form: FormState::Navigating { cursor: 0, scroll_offset: 0 } });
             } else {
+                // Save original status for revert
+                if let Some(issue) = plugin.issues.iter().find(|i| i.key == issue_key) {
+                    plugin.pending_transitions.insert(issue_key.clone(), issue.status.clone());
+                }
+                // Optimistic UI: move issue to target column
+                if let Some(issue) = plugin.issues.iter_mut().find(|i| i.key == issue_key) {
+                    issue.status = sel.to_status.clone();
+                }
+                plugin.rebuild_columns();
                 plugin.refreshing = true;
                 if let Some(tx) = &plugin.command_tx { tx.send(JiraCommand::TransitionIssue { issue_key: issue_key.clone(), transition_id: sel.id.clone(), fields: None }).ok(); }
                 plugin.modal = plugin.previous_modal.take();
@@ -605,7 +636,7 @@ pub(crate) fn handle_transition_picker_key(key: KeyEvent, plugin: &mut JiraPlugi
 // ── Transition fields key handler ───────────────────────────────────────────
 
 pub(crate) fn handle_transition_fields_key(key: KeyEvent, plugin: &mut JiraPlugin) -> PluginAction {
-    let (issue_key, transition_id, to_status, field_count, form_kind) = {
+    let (issue_key, transition_id, to_status, to_status_full, field_count, form_kind) = {
         let Some(JiraModal::TransitionFields { issue_key, transition, fields, form }) = &plugin.modal else { return PluginAction::None; };
         let fk = match form {
             FormState::Navigating { .. } | FormState::ValidationError { .. } => "nav",
@@ -614,11 +645,11 @@ pub(crate) fn handle_transition_fields_key(key: KeyEvent, plugin: &mut JiraPlugi
             FormState::MultiSelectOpen { .. } => "multi",
             FormState::Submitting => "submit",
         };
-        (issue_key.clone(), transition.id.clone(), transition.to_status.name.clone(), fields.len(), fk)
+        (issue_key.clone(), transition.id.clone(), transition.to_status.name.clone(), transition.to_status.clone(), fields.len(), fk)
     };
 
     match form_kind {
-        "nav" => handle_tf_nav(key, plugin, &issue_key, &transition_id, &to_status, field_count),
+        "nav" => handle_tf_nav(key, plugin, &issue_key, &transition_id, &to_status, &to_status_full, field_count),
         "edit" => handle_generic_form_edit(key, plugin, field_count),
         "select" => handle_generic_form_select(key, plugin, field_count),
         "multi" => handle_generic_form_multi(key, plugin, field_count),
@@ -626,32 +657,43 @@ pub(crate) fn handle_transition_fields_key(key: KeyEvent, plugin: &mut JiraPlugi
     }
 }
 
-fn handle_tf_nav(key: KeyEvent, plugin: &mut JiraPlugin, issue_key: &str, transition_id: &str, to_status: &str, field_count: usize) -> PluginAction {
+fn handle_tf_nav(key: KeyEvent, plugin: &mut JiraPlugin, issue_key: &str, transition_id: &str, to_status: &str, to_status_full: &JiraStatus, field_count: usize) -> PluginAction {
     match key.code {
         KeyCode::Char('j') | KeyCode::Down => {
             if let Some(JiraModal::TransitionFields { form, .. }) = &mut plugin.modal {
-                match form { FormState::Navigating { cursor } | FormState::ValidationError { cursor, .. } => { if *cursor + 1 < field_count { *cursor += 1; } } _ => {} }
+                match form { FormState::Navigating { cursor, .. } | FormState::ValidationError { cursor, .. } => { if *cursor + 1 < field_count { *cursor += 1; } } _ => {} }
             }
             PluginAction::None
         }
         KeyCode::Char('k') | KeyCode::Up => {
             if let Some(JiraModal::TransitionFields { form, .. }) = &mut plugin.modal {
-                match form { FormState::Navigating { cursor } | FormState::ValidationError { cursor, .. } => { if *cursor > 0 { *cursor -= 1; } } _ => {} }
+                match form { FormState::Navigating { cursor, .. } | FormState::ValidationError { cursor, .. } => { if *cursor > 0 { *cursor -= 1; } } _ => {} }
             }
             PluginAction::None
         }
         KeyCode::Enter => {
-            let cur = { let Some(JiraModal::TransitionFields { form, .. }) = &plugin.modal else { return PluginAction::None; }; match form { FormState::Navigating { cursor } | FormState::ValidationError { cursor, .. } => *cursor, _ => return PluginAction::None } };
-            if let Some(JiraModal::TransitionFields { fields, form, .. }) = &mut plugin.modal { enter_form_field_edit(fields, form, cur); }
+            let cur = { let Some(JiraModal::TransitionFields { form, .. }) = &plugin.modal else { return PluginAction::None; }; match form { FormState::Navigating { cursor, .. } | FormState::ValidationError { cursor, .. } => *cursor, _ => return PluginAction::None } };
+            if let Some(JiraModal::TransitionFields { fields, form, .. }) = &mut plugin.modal {
+                if let Some(action) = enter_form_field_edit(fields, form, cur, issue_key) { return action; }
+            }
             PluginAction::None
         }
         KeyCode::Char('S') | KeyCode::Char('s') => {
             let mi = { let Some(JiraModal::TransitionFields { fields, .. }) = &plugin.modal else { return PluginAction::None; }; fields.iter().enumerate().find(|(_, (f, v))| f.required && v.is_none()).map(|(i, _)| i) };
             if let Some(idx) = mi {
-                if let Some(JiraModal::TransitionFields { form, .. }) = &mut plugin.modal { match form { FormState::Navigating { cursor } | FormState::ValidationError { cursor, .. } => *cursor = idx, _ => {} } }
+                if let Some(JiraModal::TransitionFields { form, .. }) = &mut plugin.modal { match form { FormState::Navigating { cursor, .. } | FormState::ValidationError { cursor, .. } => *cursor = idx, _ => {} } }
                 return PluginAction::None;
             }
             let fj = { let Some(JiraModal::TransitionFields { fields, .. }) = &plugin.modal else { return PluginAction::None; }; build_field_json(fields) };
+            // Save original status for revert
+            if let Some(issue) = plugin.issues.iter().find(|i| i.key == issue_key) {
+                plugin.pending_transitions.insert(issue_key.to_string(), issue.status.clone());
+            }
+            // Optimistic UI: move issue to target column
+            if let Some(issue) = plugin.issues.iter_mut().find(|i| i.key == issue_key) {
+                issue.status = to_status_full.clone();
+            }
+            plugin.rebuild_columns();
             plugin.refreshing = true;
             if let Some(tx) = &plugin.command_tx { tx.send(JiraCommand::TransitionIssue { issue_key: issue_key.into(), transition_id: transition_id.into(), fields: Some(fj) }).ok(); }
             plugin.modal = None; plugin.previous_modal = None;
@@ -678,13 +720,13 @@ pub(super) fn handle_generic_form_edit(key: KeyEvent, plugin: &mut JiraPlugin, f
     };
     let FormState::EditingText { buffer, cursor_pos, .. } = form else { return PluginAction::None; };
     match key.code {
-        KeyCode::Char(c) => { buffer.insert(*cursor_pos, c); *cursor_pos += 1; }
-        KeyCode::Backspace => { if *cursor_pos > 0 { buffer.remove(*cursor_pos - 1); *cursor_pos -= 1; } }
-        KeyCode::Delete => { if *cursor_pos < buffer.len() { buffer.remove(*cursor_pos); } }
+        KeyCode::Char(c) => { buffer.insert(char_to_byte_idx(buffer, *cursor_pos), c); *cursor_pos += 1; }
+        KeyCode::Backspace => { if *cursor_pos > 0 { buffer.remove(char_to_byte_idx(buffer, *cursor_pos - 1)); *cursor_pos -= 1; } }
+        KeyCode::Delete => { if *cursor_pos < buffer.chars().count() { buffer.remove(char_to_byte_idx(buffer, *cursor_pos)); } }
         KeyCode::Left => { if *cursor_pos > 0 { *cursor_pos -= 1; } }
-        KeyCode::Right => { if *cursor_pos < buffer.len() { *cursor_pos += 1; } }
+        KeyCode::Right => { if *cursor_pos < buffer.chars().count() { *cursor_pos += 1; } }
         KeyCode::Home => *cursor_pos = 0,
-        KeyCode::End => *cursor_pos = buffer.len(),
+        KeyCode::End => *cursor_pos = buffer.chars().count(),
         KeyCode::Enter => {
             let val = buffer.clone();
             let ft = &fields[cur].0.field_type;
@@ -694,9 +736,9 @@ pub(super) fn handle_generic_form_edit(key: KeyEvent, plugin: &mut JiraPlugin, f
                 _ => if val.is_empty() { None } else { Some(FieldValue::Text(val)) },
             };
             fields[cur].1 = fv;
-            *form = FormState::Navigating { cursor: (cur + 1).min(field_count.saturating_sub(1)) };
+            *form = FormState::Navigating { cursor: (cur + 1).min(field_count.saturating_sub(1)), scroll_offset: 0 };
         }
-        KeyCode::Esc => { *form = FormState::Navigating { cursor: cur }; }
+        KeyCode::Esc => { *form = FormState::Navigating { cursor: cur, scroll_offset: 0 }; }
         _ => {}
     }
     PluginAction::None
@@ -716,9 +758,9 @@ pub(super) fn handle_generic_form_select(key: KeyEvent, plugin: &mut JiraPlugin,
         KeyCode::Enter => {
             let dc = *dropdown_cursor;
             if let Some(allowed) = &fields[fc].0.allowed_values { if let Some(s) = allowed.get(dc) { fields[fc].1 = Some(FieldValue::Select(s.id.clone())); } }
-            *form = FormState::Navigating { cursor: (fc + 1).min(field_count.saturating_sub(1)) };
+            *form = FormState::Navigating { cursor: (fc + 1).min(field_count.saturating_sub(1)), scroll_offset: 0 };
         }
-        KeyCode::Esc => { *form = FormState::Navigating { cursor: fc }; }
+        KeyCode::Esc => { *form = FormState::Navigating { cursor: fc, scroll_offset: 0 }; }
         _ => {}
     }
     PluginAction::None
@@ -741,32 +783,42 @@ pub(super) fn handle_generic_form_multi(key: KeyEvent, plugin: &mut JiraPlugin, 
                 let ids: Vec<String> = checked.iter().filter_map(|&i| allowed.get(i).map(|v| v.id.clone())).collect();
                 fields[fc].1 = Some(FieldValue::MultiSelect(ids));
             }
-            *form = FormState::Navigating { cursor: (fc + 1).min(field_count.saturating_sub(1)) };
+            *form = FormState::Navigating { cursor: (fc + 1).min(field_count.saturating_sub(1)), scroll_offset: 0 };
         }
-        KeyCode::Esc => { *form = FormState::Navigating { cursor: fc }; }
+        KeyCode::Esc => { *form = FormState::Navigating { cursor: fc, scroll_offset: 0 }; }
         _ => {}
     }
     PluginAction::None
 }
 
-pub(super) fn enter_form_field_edit(fields: &mut [(EditableField, Option<FieldValue>)], form: &mut FormState, cursor: usize) {
-    let Some((field, value)) = fields.get(cursor) else { return; };
+pub(super) fn enter_form_field_edit(fields: &mut [(EditableField, Option<FieldValue>)], form: &mut FormState, cursor: usize, issue_context: &str) -> Option<PluginAction> {
+    let Some((field, value)) = fields.get(cursor) else { return None; };
     match field.field_type {
         FieldType::Text | FieldType::Number | FieldType::Date => {
             let c = match value { Some(FieldValue::Text(s)) => s.clone(), Some(FieldValue::Number(n)) => if n.fract() == 0.0 { format!("{}", *n as i64) } else { format!("{n}") }, Some(FieldValue::Date(d)) => d.clone(), _ => String::new() };
-            *form = FormState::EditingText { cursor, buffer: c.clone(), cursor_pos: c.len() };
+            *form = FormState::EditingText { cursor, buffer: c.clone(), cursor_pos: c.chars().count() };
+            None
+        }
+        FieldType::TextArea => {
+            let content = match value { Some(FieldValue::Text(s)) => s.clone(), _ => String::new() };
+            Some(PluginAction::LaunchEditor {
+                content,
+                context: format!("textarea:{}:{}", issue_context, field.field_id),
+            })
         }
         FieldType::Select => {
             let ci = match value { Some(FieldValue::Select(id)) => Some(id.as_str()), _ => None };
             let dc = field.allowed_values.as_ref().and_then(|v| ci.and_then(|id| v.iter().position(|a| a.id == id))).unwrap_or(0);
             *form = FormState::SelectOpen { field_cursor: cursor, dropdown_cursor: dc };
+            None
         }
         FieldType::MultiSelect => {
             let ci: HashSet<String> = match value { Some(FieldValue::MultiSelect(ids)) => ids.iter().cloned().collect(), _ => HashSet::new() };
             let ch: HashSet<usize> = field.allowed_values.as_ref().map(|v| v.iter().enumerate().filter(|(_, a)| ci.contains(&a.id)).map(|(i, _)| i).collect()).unwrap_or_default();
             *form = FormState::MultiSelectOpen { field_cursor: cursor, dropdown_cursor: 0, checked: ch };
+            None
         }
-        FieldType::Unsupported | FieldType::TextArea => {}
+        FieldType::Unsupported => { None }
     }
 }
 
@@ -785,4 +837,45 @@ pub(super) fn build_field_json(fields: &[(EditableField, Option<FieldValue>)]) -
         }
     }
     serde_json::Value::Object(map)
+}
+
+// ── Error modal rendering ───────────────────────────────────────────────────
+
+pub(crate) fn render_error_modal(frame: &mut Frame, area: Rect, title: &str, message: &str) {
+    use ratatui::widgets::Wrap;
+
+    let msg_lines = message.lines().count().max(1);
+    // Height: 1 (title border) + msg_lines + 1 (blank) + 1 (footer) + 1 (border) + padding
+    let mh = (msg_lines as u16 + 6).min(area.height.saturating_sub(4));
+    let mw = 60u16.min(area.width.saturating_sub(4));
+    let ma = centered_rect_abs(mw, mh, area);
+    frame.render_widget(Clear, ma);
+
+    let block = Block::default()
+        .title(format!(" {} ", title))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(theme::MODAL_BORDER));
+    let inner = block.inner(ma);
+    frame.render_widget(block, ma);
+
+    if inner.height < 3 {
+        return;
+    }
+
+    // Error message text (wrapped)
+    let msg_area = Rect::new(inner.x + 1, inner.y + 1, inner.width.saturating_sub(2), inner.height.saturating_sub(3));
+    let msg_para = Paragraph::new(message)
+        .style(Style::default().fg(theme::TEXT_ERROR))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(msg_para, msg_area);
+
+    // Footer
+    let footer_y = inner.y + inner.height - 1;
+    let footer = Line::from(vec![
+        Span::styled("  Enter", theme::accent()),
+        Span::styled(": dismiss  ", theme::dim()),
+        Span::styled("Esc", theme::accent()),
+        Span::styled(": dismiss", theme::dim()),
+    ]);
+    frame.render_widget(Paragraph::new(footer), Rect::new(inner.x, footer_y, inner.width, 1));
 }

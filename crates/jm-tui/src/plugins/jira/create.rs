@@ -191,31 +191,33 @@ fn handle_create_nav(key: KeyEvent, plugin: &mut JiraPlugin, pk: &str, itid: &st
     match key.code {
         KeyCode::Char('j') | KeyCode::Down => {
             if let Some(JiraModal::CreateForm { form, .. }) = &mut plugin.modal {
-                match form { FormState::Navigating { cursor } | FormState::ValidationError { cursor, .. } => { if field_count > 0 && *cursor + 1 < field_count { *cursor += 1; } } _ => {} }
+                match form { FormState::Navigating { cursor, .. } | FormState::ValidationError { cursor, .. } => { if field_count > 0 && *cursor + 1 < field_count { *cursor += 1; } } _ => {} }
             }
             PluginAction::None
         }
         KeyCode::Char('k') | KeyCode::Up => {
             if let Some(JiraModal::CreateForm { form, .. }) = &mut plugin.modal {
-                match form { FormState::Navigating { cursor } | FormState::ValidationError { cursor, .. } => { if *cursor > 0 { *cursor -= 1; } } _ => {} }
+                match form { FormState::Navigating { cursor, .. } | FormState::ValidationError { cursor, .. } => { if *cursor > 0 { *cursor -= 1; } } _ => {} }
             }
             PluginAction::None
         }
         KeyCode::Char('g') => {
             if let Some(JiraModal::CreateForm { form, .. }) = &mut plugin.modal {
-                match form { FormState::Navigating { cursor } | FormState::ValidationError { cursor, .. } => { *cursor = 0; } _ => {} }
+                match form { FormState::Navigating { cursor, .. } | FormState::ValidationError { cursor, .. } => { *cursor = 0; } _ => {} }
             }
             PluginAction::None
         }
         KeyCode::Char('G') => {
             if let Some(JiraModal::CreateForm { form, .. }) = &mut plugin.modal {
-                match form { FormState::Navigating { cursor } | FormState::ValidationError { cursor, .. } => { *cursor = field_count.saturating_sub(1); } _ => {} }
+                match form { FormState::Navigating { cursor, .. } | FormState::ValidationError { cursor, .. } => { *cursor = field_count.saturating_sub(1); } _ => {} }
             }
             PluginAction::None
         }
         KeyCode::Enter => {
-            let cur = { let Some(JiraModal::CreateForm { form, .. }) = &plugin.modal else { return PluginAction::None; }; match form { FormState::Navigating { cursor } | FormState::ValidationError { cursor, .. } => *cursor, _ => return PluginAction::None } };
-            if let Some(JiraModal::CreateForm { fields, form, .. }) = &mut plugin.modal { super::detail::enter_form_field_edit(fields, form, cur); }
+            let cur = { let Some(JiraModal::CreateForm { form, .. }) = &plugin.modal else { return PluginAction::None; }; match form { FormState::Navigating { cursor, .. } | FormState::ValidationError { cursor, .. } => *cursor, _ => return PluginAction::None } };
+            if let Some(JiraModal::CreateForm { project_key, fields, form, .. }) = &mut plugin.modal {
+                if let Some(action) = super::detail::enter_form_field_edit(fields, form, cur, project_key) { return action; }
+            }
             PluginAction::None
         }
         KeyCode::Char('S') => {
@@ -226,7 +228,7 @@ fn handle_create_nav(key: KeyEvent, plugin: &mut JiraPlugin, pk: &str, itid: &st
             // Check for missing required fields
             let mi = { let Some(JiraModal::CreateForm { fields, .. }) = &plugin.modal else { return PluginAction::None; }; fields.iter().enumerate().find(|(_, (f, v))| f.required && v.is_none() && f.field_type != FieldType::Unsupported).map(|(i, _)| i) };
             if let Some(idx) = mi {
-                if let Some(JiraModal::CreateForm { form, .. }) = &mut plugin.modal { match form { FormState::Navigating { cursor } | FormState::ValidationError { cursor, .. } => *cursor = idx, _ => {} } }
+                if let Some(JiraModal::CreateForm { form, .. }) = &mut plugin.modal { match form { FormState::Navigating { cursor, .. } | FormState::ValidationError { cursor, .. } => *cursor = idx, _ => {} } }
                 return PluginAction::None;
             }
 
