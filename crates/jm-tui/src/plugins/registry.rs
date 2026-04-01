@@ -11,6 +11,7 @@ use jm_core::config::Config;
 use super::{
     AboutPlugin, ClockPlugin, NotificationsPlugin, PluginSidebar, PomodoroPlugin, ScreenPlugin,
     SidebarPlugin,
+    jira::{JiraConfig, JiraPlugin},
 };
 
 /// Manages both sidebar and screen plugins.
@@ -58,13 +59,23 @@ impl PluginRegistry {
                     sidebar_plugins.push(Box::new(NotificationsPlugin::new(reminders.clone())))
                 }
                 "clock" => sidebar_plugins.push(Box::new(ClockPlugin::new())),
+                "jira" => {
+                    // JIRA is a screen plugin — handled below, not a sidebar plugin.
+                }
                 _ => {} // unknown plugin names are silently skipped
             }
         }
 
         // AboutPlugin is always registered as a screen plugin — no config needed.
-        let screen_plugins: Vec<Box<dyn ScreenPlugin>> =
+        let mut screen_plugins: Vec<Box<dyn ScreenPlugin>> =
             vec![Box::new(AboutPlugin::new())];
+
+        // Register JiraPlugin if "jira" is in the enabled list and config is present.
+        if config.plugins.enabled.iter().any(|n| n == "jira") {
+            if let Some(jira_config) = JiraConfig::from_plugin_config(config) {
+                screen_plugins.push(Box::new(JiraPlugin::new(jira_config)));
+            }
+        }
 
         Self {
             sidebar: PluginSidebar::new_from(sidebar_plugins),
