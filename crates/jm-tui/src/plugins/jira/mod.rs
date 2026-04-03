@@ -567,22 +567,69 @@ impl ScreenPlugin for JiraPlugin {
             self.shutdown_flag = None;
         }
 
-        // 3. Validate credentials synchronously via GET /rest/api/3/myself.
+        // 3. Resolve credentials and target user accountId.
         let api_token = std::env::var("JIRA_API_TOKEN").unwrap_or_default();
-        match api::validate_credentials(&self.config.url, &self.config.email, &api_token) {
-            Ok(myself) => {
-                self.account_id = Some(myself.account_id);
+        let auth_email = self.config.auth_email().to_string();
+
+        if self.config.uses_service_account() {
+            // Service account mode: auth with tech account, look up target user.
+            match api::validate_credentials(&self.config.url, &auth_email, &api_token) {
+                Ok(_) => {} // Service account authenticated; discard its accountId.
+                Err(err) => {
+                    self.modal = Some(JiraModal::ErrorModal {
+                        title: "Service Account Auth Failed".to_string(),
+                        message: format!(
+                            "Could not authenticate with service account.\n\n{}\n\n\
+                             Check JIRA_API_TOKEN and plugins.jira.auth_email.",
+                            err.display()
+                        ),
+                    });
+                    self.loading = false;
+                    return;
+                }
             }
-            Err(err) => {
-                self.modal = Some(JiraModal::ErrorModal {
-                    title: "Authentication Failed".to_string(),
-                    message: format!(
-                        "Could not connect to JIRA.\n\n{}\n\nCheck JIRA_API_TOKEN and plugins.jira.email in config.",
-                        err.display()
-                    ),
-                });
-                self.loading = false;
-                return;
+            // Look up the target user's accountId by email.
+            match api::search_user_by_email(
+                &self.config.url,
+                &auth_email,
+                &api_token,
+                &self.config.email,
+            ) {
+                Ok(target_user) => {
+                    self.account_id = Some(target_user.account_id);
+                }
+                Err(err) => {
+                    self.modal = Some(JiraModal::ErrorModal {
+                        title: "Target User Not Found".to_string(),
+                        message: format!(
+                            "Authenticated as service account, but could not find \
+                             user '{}'.\n\n{}\n\nCheck plugins.jira.email.",
+                            self.config.email,
+                            err.display()
+                        ),
+                    });
+                    self.loading = false;
+                    return;
+                }
+            }
+        } else {
+            // Standard mode: email used for both auth and identity.
+            match api::validate_credentials(&self.config.url, &auth_email, &api_token) {
+                Ok(myself) => {
+                    self.account_id = Some(myself.account_id);
+                }
+                Err(err) => {
+                    self.modal = Some(JiraModal::ErrorModal {
+                        title: "Authentication Failed".to_string(),
+                        message: format!(
+                            "Could not connect to JIRA.\n\n{}\n\n\
+                             Check JIRA_API_TOKEN and plugins.jira.email.",
+                            err.display()
+                        ),
+                    });
+                    self.loading = false;
+                    return;
+                }
             }
         }
 
@@ -595,7 +642,7 @@ impl ScreenPlugin for JiraPlugin {
 
         // 6. Spawn background thread.
         let thread_base_url = self.config.url.clone();
-        let thread_email = self.config.email.clone();
+        let thread_auth_email = self.config.auth_email().to_string();
         let thread_api_token = api_token;
         let thread_account_id = self.account_id.clone().unwrap_or_default();
         let thread_sp_field = self.story_points_field.clone();
@@ -609,7 +656,7 @@ impl ScreenPlugin for JiraPlugin {
                     cmd_rx,
                     res_tx,
                     thread_base_url,
-                    thread_email,
+                    thread_auth_email,
                     thread_api_token,
                     thread_account_id,
                     thread_sp_field,

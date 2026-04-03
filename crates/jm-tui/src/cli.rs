@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, Args};
 
 #[derive(Parser)]
 #[command(name = "jm", about = "Job Manager TUI", version = "0.1.0")]
@@ -163,6 +163,12 @@ pub enum Commands {
         all: bool,
     },
 
+    /// JIRA plugin management
+    Jira {
+        #[command(subcommand)]
+        command: JiraCommands,
+    },
+
     /// Change an issue's status
     #[command(name = "issue-status")]
     IssueStatus {
@@ -173,5 +179,15 @@ pub enum Commands {
         /// New status
         #[arg(value_parser = ["todo", "active", "blocked", "done"])]
         status: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum JiraCommands {
+    /// Configure JIRA integration interactively
+    Config {
+        /// Test connection after setup
+        #[arg(long)]
+        test: bool,
     },
 }

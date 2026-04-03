@@ -27,7 +27,7 @@ use jm_core::models::{Blocker, JournalEntry, LogEntry};
 use jm_core::storage::{ActiveProjectStore, InboxStore, IssueStore, JournalStore, PeopleStore, ProjectStore};
 use jm_core::time as jm_time;
 
-use cli::{Cli, Commands};
+use cli::{Cli, Commands, JiraCommands};
 
 fn setup_terminal() -> anyhow::Result<Terminal<CrosstermBackend<std::io::Stdout>>> {
     enable_raw_mode()?;
@@ -121,6 +121,9 @@ fn main() {
             issue_id,
             status,
         }) => cmd_issue_status(&project_slug, issue_id, &status),
+        Some(Commands::Jira { command }) => match command {
+            JiraCommands::Config { test } => cmd_jira_config(test),
+        },
         None => {
             // Launch TUI
             let config = Config::load();
@@ -1025,5 +1028,183 @@ fn cmd_issue_status(slug: &str, issue_id: u32, new_status: &str) {
             eprintln!("Error: {e}");
             process::exit(1);
         }
+    }
+}
+
+// ── jm jira config ──────────────────────────────────────────────────────────
+
+fn cmd_jira_config(test: bool) {
+    use std::io::{self, BufRead, Write};
+
+    let mut config = Config::load();
+    let _ = ensure_dirs(&config);
+
+    println!();
+    println!("JIRA Cloud Setup");
+    println!("{}", "─".repeat(40));
+
+    let stdin = io::stdin();
+    let mut stdout = io::stdout();
+
+    // Prompt for URL
+    let existing_url = plugins::jira::JiraConfig::from_plugin_config(&config)
+        .map(|c| c.url)
+        .unwrap_or_default();
+    if existing_url.is_empty() {
+        print!("Instance URL (e.g., https://myorg.atlassian.net): ");
+    } else {
+        print!("Instance URL [{}]: ", existing_url);
+    }
+    stdout.flush().ok();
+    let mut url = String::new();
+    stdin.lock().read_line(&mut url).ok();
+    let url = url.trim();
+    let url = if url.is_empty() { &existing_url } else { url }.to_string();
+    if url.is_empty() {
+        eprintln!("Error: JIRA URL is required.");
+        process::exit(1);
+    }
+
+    // Prompt for target user email
+    let existing_email = plugins::jira::JiraConfig::from_plugin_config(&config)
+        .map(|c| c.email)
+        .unwrap_or_default();
+    if existing_email.is_empty() {
+        print!("Your email (whose issues to show): ");
+    } else {
+        print!("Your email [{}]: ", existing_email);
+    }
+    stdout.flush().ok();
+    let mut email = String::new();
+    stdin.lock().read_line(&mut email).ok();
+    let email = email.trim();
+    let email = if email.is_empty() { &existing_email } else { email }.to_string();
+    if email.is_empty() {
+        eprintln!("Error: Email is required.");
+        process::exit(1);
+    }
+
+    // Prompt for auth_email (optional)
+    let existing_auth = plugins::jira::JiraConfig::from_plugin_config(&config)
+        .and_then(|c| c.auth_email)
+        .unwrap_or_default();
+    if existing_auth.is_empty() {
+        print!("Service account email (optional, Enter to skip): ");
+    } else {
+        print!("Service account email [{}]: ", existing_auth);
+    }
+    stdout.flush().ok();
+    let mut auth_email = String::new();
+    stdin.lock().read_line(&mut auth_email).ok();
+    let auth_email = auth_email.trim();
+    let auth_email = if auth_email.is_empty() && !existing_auth.is_empty() {
+        existing_auth.clone()
+    } else {
+        auth_email.to_string()
+    };
+
+    // Check JIRA_API_TOKEN
+    let token = std::env::var("JIRA_API_TOKEN").unwrap_or_default();
+    if token.is_empty() {
+        println!();
+        eprintln!("Warning: JIRA_API_TOKEN is not set.");
+        eprintln!("Generate one at: https://id.atlassian.com/manage-profile/security/api-tokens");
+        eprintln!("Then: export JIRA_API_TOKEN=\"your-token\"");
+        print!("Continue without token? [y/N]: ");
+        stdout.flush().ok();
+        let mut ans = String::new();
+        stdin.lock().read_line(&mut ans).ok();
+        if !ans.trim().eq_ignore_ascii_case("y") {
+            eprintln!("Setup cancelled.");
+            process::exit(1);
+        }
+    } else {
+        println!("JIRA_API_TOKEN ... set");
+    }
+
+    // Build JIRA config JSON
+    let mut jira_json = serde_json::json!({
+        "url": url,
+        "email": email,
+        "refresh_interval_secs": 60,
+    });
+    if !auth_email.is_empty() {
+        jira_json["auth_email"] = serde_json::json!(auth_email);
+    }
+
+    // Insert into config.plugins.extra
+    let jira_yml = serde_json::from_value::<serde_yml::Value>(
+        serde_json::to_value(&jira_json).unwrap_or_default(),
+    )
+    .unwrap_or_default();
+    config.plugins.extra.insert("jira".to_string(), jira_yml);
+
+    // Ensure "jira" is in the enabled list
+    if !config.plugins.enabled.iter().any(|n| n == "jira") {
+        config.plugins.enabled.push("jira".to_string());
+    }
+
+    // Write config back
+    let config_path = expand_tilde("~/.jm/config.yaml");
+    match serde_yml::to_string(&config) {
+        Ok(yaml) => match std::fs::write(&config_path, &yaml) {
+            Ok(_) => {
+                println!();
+                println!("Configuration saved to {}", config_path.display());
+                println!("  URL:        {}", url);
+                println!("  Email:      {}", email);
+                if !auth_email.is_empty() {
+                    println!("  Auth email: {}", auth_email);
+                }
+            }
+            Err(e) => {
+                eprintln!("Error writing config: {e}");
+                process::exit(1);
+            }
+        },
+        Err(e) => {
+            eprintln!("Error serializing config: {e}");
+            process::exit(1);
+        }
+    }
+
+    // Optional: test connection
+    if test && !token.is_empty() {
+        println!();
+        let effective_auth = if auth_email.is_empty() { &email } else { &auth_email };
+
+        print!("Testing connection... ");
+        stdout.flush().ok();
+        match plugins::jira::api::validate_credentials(&url, effective_auth, &token) {
+            Ok(myself) => {
+                println!("authenticated ({})", myself.display_name);
+            }
+            Err(err) => {
+                println!("FAILED");
+                eprintln!("  {}", err.display());
+                process::exit(1);
+            }
+        }
+
+        if !auth_email.is_empty() {
+            print!("Looking up user {}... ", email);
+            stdout.flush().ok();
+            match plugins::jira::api::search_user_by_email(&url, effective_auth, &token, &email) {
+                Ok(user) => {
+                    println!("found ({})", user.display_name);
+                }
+                Err(err) => {
+                    println!("FAILED");
+                    eprintln!("  {}", err.display());
+                    process::exit(1);
+                }
+            }
+        }
+
+        println!();
+        println!("JIRA integration ready. Press J in the dashboard to open.");
+    } else if test {
+        println!();
+        println!("Skipping connection test (JIRA_API_TOKEN not set).");
     }
 }

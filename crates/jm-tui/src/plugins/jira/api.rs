@@ -108,14 +108,15 @@ const PAGE_SIZE: u64 = 100;
 /// Validate JIRA credentials by calling GET /rest/api/3/myself.
 ///
 /// This is called synchronously from `on_enter()`, NOT through the background
-/// thread. Returns the user's account ID and display name on success.
+/// thread. Returns the authenticating user's account ID and display name.
 pub(crate) fn validate_credentials(
     base_url: &str,
-    email: &str,
+    auth_email: &str,
     api_token: &str,
 ) -> Result<MyselfResponse, JiraError> {
     let agent = ureq::Agent::new_with_defaults();
-    let auth = base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", email, api_token));
+    let auth = base64::engine::general_purpose::STANDARD
+        .encode(format!("{}:{}", auth_email, api_token));
     let url = format!("{}/rest/api/3/myself", base_url.trim_end_matches('/'));
 
     let response = agent
@@ -152,6 +153,68 @@ pub(crate) fn validate_credentials(
     }
 }
 
+/// Search for a JIRA user by email address.
+///
+/// Called synchronously from `on_enter()` when a service account is configured.
+/// Uses the service account's credentials to look up the target user's accountId.
+/// Returns the first matching user, or an error if none found.
+pub(crate) fn search_user_by_email(
+    base_url: &str,
+    auth_email: &str,
+    api_token: &str,
+    target_email: &str,
+) -> Result<MyselfResponse, JiraError> {
+    let agent = ureq::Agent::new_with_defaults();
+    let auth = base64::engine::general_purpose::STANDARD
+        .encode(format!("{}:{}", auth_email, api_token));
+    let url = format!(
+        "{}/rest/api/3/user/search?query={}",
+        base_url.trim_end_matches('/'),
+        target_email
+    );
+
+    let response = agent
+        .get(&url)
+        .header("Authorization", &format!("Basic {}", auth))
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json")
+        .call()
+        .map_err(|e| JiraError {
+            status_code: 0,
+            error_messages: vec![format!("Network error: {}", e)],
+            field_errors: HashMap::new(),
+        })?;
+
+    let status = response.status().as_u16();
+    if (200..300).contains(&status) {
+        let users: Vec<MyselfResponse> =
+            response.into_body().read_json().map_err(|e| JiraError {
+                status_code: 0,
+                error_messages: vec![format!("Failed to parse user search response: {}", e)],
+                field_errors: HashMap::new(),
+            })?;
+
+        users.into_iter().next().ok_or_else(|| JiraError {
+            status_code: 404,
+            error_messages: vec![format!(
+                "No JIRA user found for email '{}'. Check plugins.jira.email in config.",
+                target_email
+            )],
+            field_errors: HashMap::new(),
+        })
+    } else {
+        let err_body: JiraErrorResponse = response
+            .into_body()
+            .read_json()
+            .unwrap_or_default();
+        Err(JiraError {
+            status_code: status,
+            error_messages: err_body.error_messages,
+            field_errors: err_body.errors,
+        })
+    }
+}
+
 // ── Background thread main loop ──────────────────────────────────────────────
 
 /// Main loop for the API background thread.
@@ -162,7 +225,7 @@ pub(crate) fn api_thread_loop(
     commands: mpsc::Receiver<JiraCommand>,
     results: mpsc::Sender<JiraResult>,
     base_url: String,
-    email: String,
+    auth_email: String,
     api_token: String,
     account_id: String,
     story_points_field: Option<String>,
@@ -170,7 +233,8 @@ pub(crate) fn api_thread_loop(
     shutdown: Arc<AtomicBool>,
 ) {
     let agent = ureq::Agent::new_with_defaults();
-    let auth = base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", email, api_token));
+    let auth = base64::engine::general_purpose::STANDARD
+        .encode(format!("{}:{}", auth_email, api_token));
     let base_url = base_url.trim_end_matches('/').to_string();
 
     let ctx = ApiContext {

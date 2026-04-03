@@ -1,24 +1,30 @@
 //! JIRA plugin configuration — deserialized from `~/.jm/config.yaml` under `plugins.jira`.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Configuration for the JIRA Cloud integration plugin.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct JiraConfig {
     /// JIRA Cloud instance URL (e.g., "https://myorg.atlassian.net").
     pub url: String,
-    /// Email address associated with the JIRA API token.
+    /// Target user email — whose issues to fetch and display.
     pub email: String,
+    /// Optional: service/technical account email used for API authentication.
+    /// When set, this email + `JIRA_API_TOKEN` are used for Basic auth,
+    /// while `email` identifies the target user whose issues are fetched.
+    /// When omitted, `email` is used for both auth and queries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_email: Option<String>,
     /// Auto-refresh interval in seconds (default: 60).
     #[serde(default = "default_refresh")]
     pub refresh_interval_secs: u64,
     /// Custom field ID for story points (e.g., "customfield_10016").
     /// If not set, auto-discovered via GET /rest/api/3/field.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub story_points_field: Option<String>,
     /// Custom field ID for sprint (e.g., "customfield_10020").
     /// If not set, auto-discovered via GET /rest/api/3/field.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sprint_field: Option<String>,
 }
 
@@ -40,6 +46,17 @@ impl JiraConfig {
         serde_json::from_value(json_val).ok()
     }
 
+    /// Returns the email to use for API authentication (Basic auth header).
+    /// If `auth_email` is set, returns that; otherwise returns `email`.
+    pub fn auth_email(&self) -> &str {
+        self.auth_email.as_deref().unwrap_or(&self.email)
+    }
+
+    /// Returns true if a separate service account is configured for auth.
+    pub fn uses_service_account(&self) -> bool {
+        self.auth_email.is_some()
+    }
+
     /// Validate that the configuration has all required values.
     ///
     /// Returns `Ok(())` if valid, or `Err(message)` describing what is missing.
@@ -49,6 +66,14 @@ impl JiraConfig {
         }
         if self.email.trim().is_empty() {
             return Err("JIRA email is empty in config (plugins.jira.email)".to_string());
+        }
+        if let Some(ref auth_email) = self.auth_email {
+            if auth_email.trim().is_empty() {
+                return Err(
+                    "JIRA auth_email is set but empty in config (plugins.jira.auth_email)"
+                        .to_string(),
+                );
+            }
         }
         if std::env::var("JIRA_API_TOKEN").unwrap_or_default().is_empty() {
             return Err(
@@ -76,12 +101,25 @@ mod tests {
         let config: JiraConfig = serde_json::from_value(json).unwrap();
         assert_eq!(config.url, "https://myorg.atlassian.net");
         assert_eq!(config.email, "matt@company.com");
+        assert_eq!(config.auth_email, None);
         assert_eq!(config.refresh_interval_secs, 120);
         assert_eq!(
             config.story_points_field,
             Some("customfield_10016".to_string())
         );
         assert_eq!(config.sprint_field, None);
+    }
+
+    #[test]
+    fn deserialize_with_auth_email() {
+        let json = serde_json::json!({
+            "url": "https://myorg.atlassian.net",
+            "email": "matt@company.com",
+            "auth_email": "jira-bot@company.com"
+        });
+        let config: JiraConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(config.email, "matt@company.com");
+        assert_eq!(config.auth_email, Some("jira-bot@company.com".to_string()));
     }
 
     #[test]
@@ -92,6 +130,7 @@ mod tests {
         });
         let config: JiraConfig = serde_json::from_value(json).unwrap();
         assert_eq!(config.refresh_interval_secs, 60);
+        assert_eq!(config.auth_email, None);
         assert_eq!(config.story_points_field, None);
         assert_eq!(config.sprint_field, None);
     }
@@ -108,6 +147,7 @@ mod tests {
         let config = JiraConfig {
             url: "".to_string(),
             email: "test@test.com".to_string(),
+            auth_email: None,
             refresh_interval_secs: 60,
             story_points_field: None,
             sprint_field: None,
@@ -120,10 +160,52 @@ mod tests {
         let config = JiraConfig {
             url: "https://test.atlassian.net".to_string(),
             email: "".to_string(),
+            auth_email: None,
             refresh_interval_secs: 60,
             story_points_field: None,
             sprint_field: None,
         };
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn validate_empty_auth_email() {
+        let config = JiraConfig {
+            url: "https://test.atlassian.net".to_string(),
+            email: "test@test.com".to_string(),
+            auth_email: Some("".to_string()),
+            refresh_interval_secs: 60,
+            story_points_field: None,
+            sprint_field: None,
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn auth_email_helper_returns_auth_when_set() {
+        let config = JiraConfig {
+            url: "https://test.atlassian.net".to_string(),
+            email: "matt@company.com".to_string(),
+            auth_email: Some("bot@company.com".to_string()),
+            refresh_interval_secs: 60,
+            story_points_field: None,
+            sprint_field: None,
+        };
+        assert_eq!(config.auth_email(), "bot@company.com");
+        assert!(config.uses_service_account());
+    }
+
+    #[test]
+    fn auth_email_helper_returns_email_when_not_set() {
+        let config = JiraConfig {
+            url: "https://test.atlassian.net".to_string(),
+            email: "matt@company.com".to_string(),
+            auth_email: None,
+            refresh_interval_secs: 60,
+            story_points_field: None,
+            sprint_field: None,
+        };
+        assert_eq!(config.auth_email(), "matt@company.com");
+        assert!(!config.uses_service_account());
     }
 }
